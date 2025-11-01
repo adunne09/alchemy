@@ -9,6 +9,7 @@ import {
 } from "../../src/cloudflare/index.ts";
 import { Worker } from "../../src/cloudflare/worker.ts";
 import { destroy } from "../../src/destroy.ts";
+import { RemoteImage } from "../../src/docker/remote-image.ts";
 import "../../src/test/vitest.ts";
 import { BRANCH_PREFIX } from "../util.ts";
 
@@ -159,6 +160,109 @@ describe.sequential("Container Resource", () => {
         name: applicationId,
         id: expect.any(String),
       });
+    } finally {
+      await destroy(scope);
+    }
+  });
+
+  test("use prebuilt CF image without rebuild", async (scope) => {
+    const containerName = `${BRANCH_PREFIX}-prebuilt-cf-image`;
+
+    try {
+      // First, build and push an image
+      const builtContainer = await Container(`${containerName}-build`, {
+        className: "TestContainer",
+        name: containerName,
+        tag: "v1.0.0",
+        build: {
+          context: path.join(import.meta.dirname, "container"),
+        },
+        adopt: true,
+      });
+
+      // Now use the prebuilt image reference
+      const prebuiltContainer = await Container(`${containerName}-prebuilt`, {
+        className: "TestContainer",
+        image: builtContainer.image.imageRef,
+        adopt: true,
+      });
+
+      expect(prebuiltContainer.image.imageRef).toBe(
+        builtContainer.image.imageRef,
+      );
+      expect(prebuiltContainer.image.name).toBeTruthy();
+    } finally {
+      await destroy(scope);
+    }
+  });
+
+  test("pull and push external image to CF", async (scope) => {
+    const containerName = `${BRANCH_PREFIX}-external-image`;
+
+    try {
+      // Use a small external image - automatically pushed to CF
+      const container = await Container(containerName, {
+        className: "TestContainer",
+        name: containerName,
+        image: "nginx:alpine",
+        adopt: true,
+      });
+
+      expect(container.image.imageRef).toContain("registry.cloudflare.com");
+      expect(container.image.name).toBeTruthy();
+    } finally {
+      await destroy(scope);
+    }
+  });
+
+  test("error when both image and build are specified", async (scope) => {
+    try {
+      await expect(
+        Container(`${BRANCH_PREFIX}-both-image-build`, {
+          className: "TestContainer",
+          image: "nginx:alpine",
+          build: {
+            context: path.join(import.meta.dirname, "container"),
+          },
+        }),
+      ).rejects.toThrow(/Cannot specify both 'image' and 'build'/);
+    } finally {
+      await destroy(scope);
+    }
+  });
+
+  test("error when neither image nor build are specified", async (scope) => {
+    try {
+      await expect(
+        Container(`${BRANCH_PREFIX}-no-image-no-build`, {
+          className: "TestContainer",
+        }),
+      ).rejects.toThrow(/requires either 'image' or 'build'/);
+    } finally {
+      await destroy(scope);
+    }
+  });
+
+  test("use RemoteImage resource", async (scope) => {
+    const containerName = `${BRANCH_PREFIX}-remote-image-resource`;
+
+    try {
+      // Create a RemoteImage resource
+      const remoteImage = await RemoteImage(`${containerName}-remote`, {
+        name: "nginx",
+        tag: "alpine",
+      });
+
+      // Use it in a container - automatically pushed to CF
+      const container = await Container(containerName, {
+        className: "TestContainer",
+        name: containerName,
+        image: remoteImage,
+        adopt: true,
+      });
+
+      expect(container.image.imageRef).toContain("registry.cloudflare.com");
+      expect(container.image.name).toBeTruthy();
     } finally {
       await destroy(scope);
     }

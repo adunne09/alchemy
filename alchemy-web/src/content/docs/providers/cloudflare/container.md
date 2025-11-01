@@ -83,6 +83,70 @@ This will build your Dockerfile and prepare it for publishing to Cloudflare's Im
 > });
 > ```
 
+## Using Prebuilt Images
+
+Instead of building from source, you can use a prebuilt image. This is useful for faster deployments, promoting images across environments, or using external base images.
+
+### Cloudflare Registry Image
+
+Use an image already in the Cloudflare registry:
+
+```ts
+const container = await Container<MyContainer>("my-container", {
+  className: "MyContainer",
+  image: "my-app:v1.0.0",
+});
+```
+
+### External Image
+
+Use an image from an external registry (Docker Hub, GitHub Container Registry, etc.). The image will be automatically pulled and pushed to Cloudflare's registry:
+
+```ts
+const container = await Container<MyContainer>("my-container", {
+  className: "MyContainer",
+  image: "nginx:alpine",
+});
+```
+
+> [!NOTE]
+> Cloudflare Containers currently only support images hosted in Cloudflare's registry (`registry.cloudflare.com`). External images are automatically pulled and pushed to the Cloudflare registry during deployment.
+
+### Using RemoteImage Resource
+
+For more control over external images, use the `RemoteImage` resource:
+
+```ts
+import { RemoteImage } from "alchemy/docker";
+
+const baseImage = await RemoteImage("base", {
+  name: "ghcr.io/my-org/my-app",
+  tag: "v1.2.3",
+});
+
+const container = await Container<MyContainer>("my-container", {
+  className: "MyContainer",
+  image: baseImage,
+});
+```
+
+### Image Promotion Workflow
+
+You can use prebuilt images to promote the same image across environments:
+
+```ts
+// Build once in CI/CD
+const builtImage = await Container<MyContainer>("my-container", {
+  className: "MyContainer",
+});
+
+// Promote to production using the same image
+const prodContainer = await Container<MyContainer>("prod-container", {
+  className: "MyContainer",
+  image: builtImage.image.imageRef,
+});
+```
+
 ## Adopting Existing Containers
 
 By default, if a container application with the same name already exists, Alchemy will throw an error. However, you can use the `adopt` property to take over management of an existing container application:

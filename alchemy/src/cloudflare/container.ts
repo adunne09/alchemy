@@ -1,5 +1,6 @@
 import type { Context } from "../context.ts";
 import { Image, type ImageProps } from "../docker/image.ts";
+import { RemoteImage } from "../docker/remote-image.ts";
 import { Resource } from "../resource.ts";
 import { Scope } from "../scope.ts";
 import { secret } from "../secret.ts";
@@ -23,6 +24,33 @@ export interface ContainerProps
    * This is used to identify the container class in Worker bindings.
    */
   className: string;
+
+  /**
+   * Use a prebuilt image instead of building one.
+   * Can be a string (image reference), RemoteImage resource, or Image resource.
+   * Mutually exclusive with `build` property.
+   *
+   * - String: Image reference (e.g., "my-image:v1.0.0" for CF registry or "nginx:alpine" for external)
+   * - RemoteImage: External image pulled from a registry
+   * - Image: Previously built image resource
+   *
+   * External images (from Docker Hub, GitHub Container Registry, etc.) are automatically
+   * pulled and pushed to Cloudflare's registry, as Cloudflare Containers currently only
+   * support images from registry.cloudflare.com.
+   *
+   * @example
+   * // Use an image already in Cloudflare registry
+   * image: "my-app:v1.0.0"
+   *
+   * @example
+   * // Use an external image (will be automatically pushed to CF registry)
+   * image: "nginx:alpine"
+   *
+   * @example
+   * // Use a RemoteImage resource
+   * image: await RemoteImage("base", { name: "ghcr.io/org/app:1.2.3" })
+   */
+  image?: string | RemoteImage | Image;
 
   /**
    * Maximum number of container instances that can be running.
@@ -189,6 +217,75 @@ export type Container<T = any> = {
   __phantom?: T;
 };
 
+/**
+ * Extract name from an image reference
+ * @internal
+ */
+function extractNameFromImageRef(imageRef: string): string {
+  // Remove registry host if present
+  let name = imageRef;
+  const parts = imageRef.split("/");
+  if (parts[0].includes(".") || parts[0].includes(":")) {
+    // Has registry prefix, remove it
+    name = parts.slice(1).join("/");
+  }
+  // Remove tag or digest
+  return name.split(":")[0].split("@")[0];
+}
+
+/**
+ * Retag and push an image to Cloudflare registry
+ * @internal
+ */
+async function retagAndPushToCloudflare(
+  sourceImageRef: string,
+  targetName: string,
+  targetTag: string,
+  api: CloudflareApi,
+): Promise<Image> {
+  const { DockerApi } = await import("../docker/api.ts");
+  const docker = new DockerApi();
+  const cloudflareRegistry = getCloudflareContainerRegistry();
+
+  const credentials = await getContainerCredentials(api);
+  const cfImageName = `${api.accountId}/${targetName}`;
+  const cfImageRef = `${cloudflareRegistry}/${cfImageName}:${targetTag}`;
+
+  // Pull the source image if not already local
+  await docker.pullImage(sourceImageRef);
+
+  // Tag the image for Cloudflare registry
+  await docker.exec(["tag", sourceImageRef, cfImageRef]);
+
+  // Login to Cloudflare registry and push
+  await docker.login(
+    cloudflareRegistry,
+    credentials.username || credentials.user!,
+    credentials.password,
+  );
+
+  const { stdout: pushOut } = await docker.exec(["push", cfImageRef]);
+
+  // Logout from registry
+  await docker.logout(cloudflareRegistry);
+
+  // Extract repo digest from push output
+  let repoDigest: string | undefined;
+  const digestMatch = /digest:\s+([a-z0-9]+:[a-f0-9]{64})/.exec(pushOut);
+  if (digestMatch) {
+    const digestHash = digestMatch[1];
+    repoDigest = `${cloudflareRegistry}/${cfImageName}@${digestHash}`;
+  }
+
+  return {
+    name: cfImageName,
+    tag: targetTag,
+    imageRef: cfImageRef,
+    repoDigest,
+    builtAt: Date.now(),
+  };
+}
+
 export async function Container<T>(
   id: string,
   props: ContainerProps,
@@ -217,11 +314,33 @@ export async function Container<T>(
 
   const isDev = scope.local && !props.dev?.remote;
   if (isDev) {
-    const image = await Image(id, {
-      name: `cloudflare-dev/${name}`, // prefix used by Miniflare
-      tag,
-      build: props.build,
-    });
+    // In local dev mode, always build if build config is provided
+    // Otherwise use the provided image or create a placeholder
+    let image: Image;
+    if (props.build) {
+      image = await Image(id, {
+        name: `cloudflare-dev/${name}`, // prefix used by Miniflare
+        tag,
+        build: props.build,
+      });
+    } else if (props.image) {
+      // Use provided image in dev mode
+      if (typeof props.image === "string") {
+        image = {
+          name: props.image.split(":")[0],
+          tag: props.image.split(":")[1] || "latest",
+          imageRef: props.image,
+          builtAt: Date.now(),
+        };
+      } else {
+        image = props.image as Image;
+      }
+    } else {
+      throw new Error(
+        `Container requires either 'image' or 'build' property. ` +
+          `Specify 'image' to use a prebuilt image or 'build' to build from source.`,
+      );
+    }
 
     return {
       ...output,
@@ -229,22 +348,81 @@ export async function Container<T>(
     };
   }
 
-  const api = await createCloudflareApi(props);
-  const credentials = await getContainerCredentials(api);
+  // Validate mutual exclusivity
+  if (props.image && props.build) {
+    throw new Error(
+      `Cannot specify both 'image' and 'build' properties. ` +
+        `Use 'image' for prebuilt images or 'build' to build from source.`,
+    );
+  }
 
-  const image = await Image(id, {
-    name: `${api.accountId}/${name}`,
-    tag,
-    build: {
-      platform: props.build?.platform ?? "linux/amd64",
-      ...props.build,
-    },
-    registry: {
-      server: "registry.cloudflare.com",
-      username: credentials.username || credentials.user!,
-      password: secret(credentials.password),
-    },
-  });
+  const api = await createCloudflareApi(props);
+
+  let image: Image;
+
+  if (props.image) {
+    // Handle prebuilt image
+    if (typeof props.image === "string") {
+      const imageRef = props.image;
+
+      // Check if it's already in Cloudflare registry
+      if (isCloudflareRegistryLink(imageRef)) {
+        // Already in CF registry, create a lightweight Image reference
+        const imageName = extractNameFromImageRef(imageRef);
+        const imageTag = imageRef.includes(":")
+          ? imageRef.split(":").pop()!.split("@")[0]
+          : "latest";
+
+        image = {
+          name: imageName,
+          tag: imageTag,
+          imageRef: imageRef,
+          repoDigest: imageRef.includes("@") ? imageRef : undefined,
+          builtAt: Date.now(),
+        };
+      } else {
+        // External image - automatically push to CF registry
+        // Cloudflare Containers currently only support images from registry.cloudflare.com
+        image = await retagAndPushToCloudflare(imageRef, name, tag, api);
+      }
+    } else {
+      // It's an Image or RemoteImage resource
+      const sourceImage = props.image as Image | RemoteImage;
+      const sourceImageRef = sourceImage.imageRef;
+
+      // Check if it's already in CF registry
+      if (isCloudflareRegistryLink(sourceImageRef)) {
+        // Already in CF registry, use as-is
+        image = sourceImage as Image;
+      } else {
+        // Not in CF registry - automatically push to CF registry
+        // Cloudflare Containers currently only support images from registry.cloudflare.com
+        image = await retagAndPushToCloudflare(sourceImageRef, name, tag, api);
+      }
+    }
+  } else if (props.build) {
+    // Build from source
+    const credentials = await getContainerCredentials(api);
+
+    image = await Image(id, {
+      name: `${api.accountId}/${name}`,
+      tag,
+      build: {
+        platform: props.build?.platform ?? "linux/amd64",
+        ...props.build,
+      },
+      registry: {
+        server: getCloudflareContainerRegistry(),
+        username: credentials.username || credentials.user!,
+        password: secret(credentials.password),
+      },
+    });
+  } else {
+    throw new Error(
+      `Container requires either 'image' or 'build' property. ` +
+        `Specify 'image' to use a prebuilt image or 'build' to build from source.`,
+    );
+  }
 
   return {
     ...output,
