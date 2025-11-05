@@ -312,6 +312,14 @@ export async function Container<T>(
     adopt: props.adopt,
   };
 
+  // Validate mutual exclusivity
+  if (props.image && props.build) {
+    throw new Error(
+      `Cannot specify both 'image' and 'build' properties. ` +
+        `Use 'image' for prebuilt images or 'build' to build from source.`,
+    );
+  }
+
   const isDev = scope.local && !props.dev?.remote;
   if (isDev) {
     // In local dev mode, always build if build config is provided
@@ -346,14 +354,6 @@ export async function Container<T>(
       ...output,
       image,
     };
-  }
-
-  // Validate mutual exclusivity
-  if (props.image && props.build) {
-    throw new Error(
-      `Cannot specify both 'image' and 'build' properties. ` +
-        `Use 'image' for prebuilt images or 'build' to build from source.`,
-    );
   }
 
   const api = await createCloudflareApi(props);
