@@ -245,12 +245,16 @@ export async function Container<T>(
           platform: props.build?.platform ?? "linux/amd64",
           ...props.build,
         }
-      : {
-          dockerfile: "Dockerfile",
-          platform: "linux/amd64",
-          context: process.cwd(),
-        },
+      : props.image
+        ? undefined
+        : {
+            dockerfile: "Dockerfile",
+            platform: "linux/amd64",
+            context: process.cwd(),
+          },
     image: props.image,
+    // Skip pulling remote images - Cloudflare pulls at runtime
+    skipPull: props.image !== undefined,
     registry: {
       server: "registry.cloudflare.com",
       username: credentials.username || credentials.user!,

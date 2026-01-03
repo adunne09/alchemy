@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "pathe";
-import { describe, expect } from "vitest";
+import { describe, expect, vi } from "vitest";
 import { alchemy } from "../../src/alchemy.ts";
+import { DockerApi } from "../../src/docker/api.ts";
 import { Image } from "../../src/docker/image.ts";
 import { BRANCH_PREFIX } from "../util.ts";
 
@@ -124,6 +125,59 @@ describe("Image", () => {
       ).toBe(true);
       expect(message).toMatch(/non[\\/]+existent[\\/]+path/);
     } finally {
+      await alchemy.destroy(scope);
+    }
+  });
+
+  test("should skip pull and tag when skipPull is true", async (scope) => {
+    // Spy on DockerApi methods to verify they are not called
+    const pullSpy = vi.spyOn(DockerApi.prototype, "pullImage");
+    const tagSpy = vi.spyOn(DockerApi.prototype, "tagImage");
+
+    try {
+      const image = await Image("test-skip-pull", {
+        image: "nginx:alpine",
+        skipPull: true,
+        skipPush: true,
+      });
+
+      // Verify pull and tag were NOT called
+      expect(pullSpy).not.toHaveBeenCalled();
+      expect(tagSpy).not.toHaveBeenCalled();
+
+      // Verify image reference is still set correctly
+      expect(image.imageRef).toBe("nginx:alpine");
+      expect(image.name).toBe("nginx");
+      expect(image.tag).toBe("alpine");
+    } finally {
+      pullSpy.mockRestore();
+      tagSpy.mockRestore();
+      await alchemy.destroy(scope);
+    }
+  });
+
+  test("should pull and tag when skipPull is false (default)", async (scope) => {
+    // Spy on DockerApi methods to verify they are called
+    const pullSpy = vi.spyOn(DockerApi.prototype, "pullImage");
+    const tagSpy = vi.spyOn(DockerApi.prototype, "tagImage");
+
+    try {
+      const image = await Image("test-no-skip-pull", {
+        image: "alpine:latest",
+        skipPull: false,
+        skipPush: true,
+      });
+
+      // Verify pull and tag were called
+      expect(pullSpy).toHaveBeenCalledWith("alpine:latest");
+      expect(tagSpy).toHaveBeenCalled();
+
+      // Verify image properties
+      expect(image.name).toBe("alpine");
+      expect(image.tag).toBe("latest");
+    } finally {
+      pullSpy.mockRestore();
+      tagSpy.mockRestore();
       await alchemy.destroy(scope);
     }
   });

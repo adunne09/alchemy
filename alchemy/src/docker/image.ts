@@ -89,6 +89,13 @@ export type ImageProps = {
    * Whether to skip pushing the image to registry
    */
   skipPush?: boolean;
+
+  /**
+   * Whether to skip pulling remote images.
+   * When true, the image reference is used directly without pulling locally.
+   * Useful for deploy scenarios where the runtime pulls the image.
+   */
+  skipPull?: boolean;
 } & (
   | {
       /**
@@ -201,16 +208,19 @@ export const Image = Resource(
       const image =
         typeof props.image === "string" ? props.image : props.image.imageRef;
 
-      const kind =
-        typeof props.image === "object" && props.image.kind === "Image"
-          ? "local"
-          : "remote";
-      if (kind === "remote") {
-        await api.pullImage(image);
+      // Skip pull/tag when skipPull is true - image will be used directly by runtime
+      if (!props.skipPull) {
+        const kind =
+          typeof props.image === "object" && props.image.kind === "Image"
+            ? "local"
+            : "remote";
+        if (kind === "remote") {
+          await api.pullImage(image);
+        }
+        await api.tagImage(image, imageRef);
       }
-      await api.tagImage(image, imageRef);
       // TODO: Extract image ID from pull output if available
-    } else {
+    } else if (props.build) {
       let context: string;
       let dockerfile: string;
       if (props.build?.dockerfile && props.build?.context) {
@@ -281,10 +291,10 @@ export const Image = Resource(
       imageId = imageIdMatch ? imageIdMatch[1] : undefined;
     }
 
-    // Handle push if required
+    // Handle push if required (skip if skipPull is true since we don't have a local image)
     let repoDigest: string | undefined;
     let finalImageRef = imageRef;
-    if (props.registry && !props.skipPush) {
+    if (props.registry && !props.skipPush && !props.skipPull) {
       const { server, username, password } = props.registry;
 
       // Ensure the registry server does not have trailing slash
