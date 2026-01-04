@@ -189,10 +189,60 @@ export type Container<T = any> = {
   __phantom?: T;
 };
 
+/**
+ * Normalize an image reference for Cloudflare Container deployments.
+ *
+ * Follows wrangler's resolveImageName logic:
+ * - Short names like "myapp:v1" → "registry.cloudflare.com/{accountId}/myapp:v1"
+ * - CF registry without accountId like "registry.cloudflare.com/myapp:v1" → adds accountId
+ * - External registries like "docker.io/nginx:1.25" → pass through unchanged
+ */
+export function resolveImageName(accountId: string, image: string): string {
+  const cfRegistry = getCloudflareContainerRegistry();
+
+  // Check if image has a registry prefix (contains a dot in the first segment)
+  const firstSegment = image.split("/")[0];
+  const hasRegistryPrefix = firstSegment.includes(".");
+
+  if (!hasRegistryPrefix) {
+    // Short name like "myapp:v1" → add CF registry + accountId
+    return `${cfRegistry}/${accountId}/${image}`;
+  }
+
+  if (image.startsWith(`${cfRegistry}/`)) {
+    // CF registry image - check if accountId is present
+    const afterRegistry = image.slice(`${cfRegistry}/`.length);
+    const segments = afterRegistry.split("/");
+
+    // If only one segment (e.g., "myapp:tag"), add accountId
+    // If first segment doesn't look like an accountId (32 hex chars), add it
+    if (segments.length === 1) {
+      return `${cfRegistry}/${accountId}/${afterRegistry}`;
+    }
+
+    // Check if first segment is the accountId (32 hex chars)
+    const possibleAccountId = segments[0];
+    const isAccountId = /^[a-f0-9]{32}$/.test(possibleAccountId);
+
+    if (!isAccountId) {
+      // First segment is not an accountId, prepend it
+      return `${cfRegistry}/${accountId}/${afterRegistry}`;
+    }
+  }
+
+  // External registry or already fully-qualified CF registry → pass through
+  return image;
+}
+
 export async function Container<T>(
   id: string,
   props: ContainerProps,
 ): Promise<Container<T>> {
+  // Validate that build and image are mutually exclusive
+  if (props.build && props.image) {
+    throw new Error("Container: specify either `build` or `image`, not both.");
+  }
+
   const scope = Scope.current;
   const name = props.name ?? scope.createPhysicalName(id);
   const tag =
@@ -216,6 +266,76 @@ export async function Container<T>(
   };
 
   const isDev = scope.local && !props.dev?.remote;
+
+  // Prebuilt image path: use as-is, no Docker pull/push
+  // This matches wrangler's behavior where registry URIs are passed directly
+  // to the Cloudflare API without any local Docker operations
+  if (props.image && !props.build) {
+    const rawImageRef =
+      typeof props.image === "string" ? props.image : props.image.imageRef;
+
+    if (isDev) {
+      // For local dev with prebuilt images, we need to pull and re-tag
+      // UNLESS it's a Cloudflare registry image (which would 401)
+      if (isCloudflareRegistryLink(rawImageRef)) {
+        throw new Error(
+          `Cannot use Cloudflare registry image "${rawImageRef}" in local development mode. ` +
+            `Either use dev: { remote: true } to deploy to Cloudflare's edge, ` +
+            `or use an external registry image that can be pulled locally.`,
+        );
+      }
+
+      // For external registry images in dev mode, pull and re-tag for Miniflare
+      const image = await Image(id, {
+        image: props.image,
+        tag,
+      });
+
+      // Re-tag the image for Miniflare's cloudflare-dev namespace
+      const dockerApi = new (await import("../docker/api.ts")).DockerApi();
+      const devImageRef = `cloudflare-dev/${name}:${tag}`;
+      await dockerApi.tagImage(image.imageRef, devImageRef);
+
+      return {
+        ...output,
+        image: {
+          ...image,
+          name: `cloudflare-dev/${name}`,
+          imageRef: devImageRef,
+        },
+      };
+    }
+
+    // Non-dev mode: normalize the image reference and use directly
+    const api = await createCloudflareApi(props);
+    const imageRef = resolveImageName(api.accountId, rawImageRef);
+
+    // Extract name and tag from the resolved reference
+    const [refWithoutDigest] = imageRef.split("@");
+    const lastColonIndex = refWithoutDigest.lastIndexOf(":");
+    const namePart =
+      lastColonIndex > -1
+        ? refWithoutDigest.slice(0, lastColonIndex)
+        : refWithoutDigest;
+    const tagPart =
+      lastColonIndex > -1 ? refWithoutDigest.slice(lastColonIndex + 1) : tag;
+
+    const image: Image = {
+      kind: "Image",
+      name: namePart,
+      imageRef,
+      tag: tagPart,
+      builtAt: Date.now(),
+      build: undefined,
+    };
+
+    return {
+      ...output,
+      image,
+    };
+  }
+
+  // Build path: build locally and push to Cloudflare registry
   if (isDev) {
     const image = await Image(id, {
       ...props,
@@ -250,7 +370,6 @@ export async function Container<T>(
           platform: "linux/amd64",
           context: process.cwd(),
         },
-    image: props.image,
     registry: {
       server: "registry.cloudflare.com",
       username: credentials.username || credentials.user!,
