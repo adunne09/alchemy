@@ -1,3 +1,13 @@
+## v0.83.0
+
+### &nbsp;&nbsp;&nbsp;🚀 Features
+
+- **cloudflare**: Support rollout strategy in Container &nbsp;-&nbsp; by **Sam Goodwin** in https://github.com/alchemy-run/alchemy/issues/1290 [<samp>(47ba3)</samp>](https://github.com/alchemy-run/alchemy/commit/47ba3ea8)
+
+##### &nbsp;&nbsp;&nbsp;&nbsp;[View changes on GitHub](https://github.com/alchemy-run/alchemy/compare/v0.82.2...v0.83.0)
+
+---
+
 ## v0.82.2
 
 ### &nbsp;&nbsp;&nbsp;🐞 Bug Fixes

@@ -258,92 +258,186 @@ describe.sequential("Container Resource", () => {
     }
   });
 
-  test("throws error when both build and image are specified", async (scope) => {
-    await expect(
-      Container(`${BRANCH_PREFIX}-invalid-container`, {
-        className: "TestContainer",
-        name: "invalid-container",
-        image: "nginx:alpine",
+  test("rollout with rolling strategy is passed through Worker", async (scope) => {
+    const containerName = `${BRANCH_PREFIX}-container-rollout-worker`;
+    const workerName = `${BRANCH_PREFIX}-worker-with-rollout`;
+
+    try {
+      const container = await Container(containerName, {
+        className: "MyContainer",
+        name: containerName,
+        tag: "latest",
         build: {
           context: path.join(import.meta.dirname, "container"),
         },
-      } as any),
-    ).rejects.toThrow("specify either `build` or `image`, not both");
-  });
-
-  test("prebuilt CF registry image skips Docker pull (no 401)", async (scope) => {
-    const containerName = `${BRANCH_PREFIX}-prebuilt-cf-image`;
-    const cfRegistry = getCloudflareContainerRegistry();
-
-    try {
-      // Use a CF registry image reference - should NOT attempt to pull
-      // This would cause a 401 if pulled, but should pass since we skip the pull
-      const container = await Container(containerName, {
-        className: "TestContainer",
-        name: containerName,
-        image: `${cfRegistry}/${api.accountId}/test-image:v1`,
         adopt: true,
+        maxInstances: 2,
+        rollout: {
+          strategy: "rolling",
+          stepPercentage: 25,
+        },
       });
 
-      // Verify the image reference is preserved (with normalization)
-      expect(container.image.imageRef).toBe(
-        `${cfRegistry}/${api.accountId}/test-image:v1`,
-      );
-      expect(container.image.build).toBeUndefined();
+      expect(container.rollout).toMatchObject({
+        strategy: "rolling",
+        stepPercentage: 25,
+      });
+
+      // Create worker with the container binding
+      await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        entrypoint: path.join(import.meta.dirname, "container-handler.ts"),
+        compatibilityFlags: ["nodejs_compat"],
+        compatibilityDate: "2025-06-24",
+        format: "esm",
+        bindings: {
+          MY_CONTAINER: container,
+        },
+      });
+
+      // Verify the container application was created
+      const app = await getContainerApplicationByName(api, containerName);
+      expect(app).toBeDefined();
+      expect(app?.name).toBe(containerName);
     } finally {
       await destroy(scope);
     }
   });
-});
 
-describe("resolveImageName", () => {
-  const accountId = "abc123def456abc123def456abc12345";
-  const cfRegistry = getCloudflareContainerRegistry();
+  test("rollout with immediate strategy", async (scope) => {
+    const containerName = `${BRANCH_PREFIX}-container-immediate-rollout`;
+    const workerName = `${BRANCH_PREFIX}-worker-immediate-rollout`;
 
-  vitestTest("adds CF registry and accountId to short names", () => {
-    expect(resolveImageName(accountId, "myapp:v1")).toBe(
-      `${cfRegistry}/${accountId}/myapp:v1`,
-    );
-    expect(resolveImageName(accountId, "my-image:latest")).toBe(
-      `${cfRegistry}/${accountId}/my-image:latest`,
-    );
+    try {
+      const container = await Container(containerName, {
+        className: "MyContainer",
+        name: containerName,
+        tag: "latest",
+        build: {
+          context: path.join(import.meta.dirname, "container"),
+        },
+        adopt: true,
+        maxInstances: 2,
+        rollout: {
+          strategy: "immediate",
+        },
+      });
+
+      expect(container.rollout).toMatchObject({
+        strategy: "immediate",
+      });
+
+      // Create worker with the container binding
+      await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        entrypoint: path.join(import.meta.dirname, "container-handler.ts"),
+        compatibilityFlags: ["nodejs_compat"],
+        compatibilityDate: "2025-06-24",
+        format: "esm",
+        bindings: {
+          MY_CONTAINER: container,
+        },
+      });
+
+      // Verify the container application was created
+      const app = await getContainerApplicationByName(api, containerName);
+      expect(app).toBeDefined();
+      expect(app?.name).toBe(containerName);
+    } finally {
+      await destroy(scope);
+    }
+
+    test("throws error when both build and image are specified", async (scope) => {
+      await expect(
+        Container(`${BRANCH_PREFIX}-invalid-container`, {
+          className: "TestContainer",
+          name: "invalid-container",
+          image: "nginx:alpine",
+          build: {
+            context: path.join(import.meta.dirname, "container"),
+          },
+        } as any),
+      ).rejects.toThrow("specify either `build` or `image`, not both");
+    });
+
+    test("prebuilt CF registry image skips Docker pull (no 401)", async (scope) => {
+      const containerName = `${BRANCH_PREFIX}-prebuilt-cf-image`;
+      const cfRegistry = getCloudflareContainerRegistry();
+
+      try {
+        // Use a CF registry image reference - should NOT attempt to pull
+        // This would cause a 401 if pulled, but should pass since we skip the pull
+        const container = await Container(containerName, {
+          className: "TestContainer",
+          name: containerName,
+          image: `${cfRegistry}/${api.accountId}/test-image:v1`,
+          adopt: true,
+        });
+
+        // Verify the image reference is preserved (with normalization)
+        expect(container.image.imageRef).toBe(
+          `${cfRegistry}/${api.accountId}/test-image:v1`,
+        );
+        expect(container.image.build).toBeUndefined();
+      } finally {
+        await destroy(scope);
+      }
+    });
   });
 
-  vitestTest("adds accountId to CF registry images missing accountId", () => {
-    expect(resolveImageName(accountId, `${cfRegistry}/myapp:v1`)).toBe(
-      `${cfRegistry}/${accountId}/myapp:v1`,
-    );
-    expect(
-      resolveImageName(accountId, `${cfRegistry}/session-container:44f030b`),
-    ).toBe(`${cfRegistry}/${accountId}/session-container:44f030b`);
-  });
+  describe("resolveImageName", () => {
+    const accountId = "abc123def456abc123def456abc12345";
+    const cfRegistry = getCloudflareContainerRegistry();
 
-  vitestTest("adds accountId when first segment is not an accountId", () => {
-    expect(
-      resolveImageName(accountId, `${cfRegistry}/some-name/image:tag`),
-    ).toBe(`${cfRegistry}/${accountId}/some-name/image:tag`);
-  });
+    vitestTest("adds CF registry and accountId to short names", () => {
+      expect(resolveImageName(accountId, "myapp:v1")).toBe(
+        `${cfRegistry}/${accountId}/myapp:v1`,
+      );
+      expect(resolveImageName(accountId, "my-image:latest")).toBe(
+        `${cfRegistry}/${accountId}/my-image:latest`,
+      );
+    });
 
-  vitestTest(
-    "preserves fully-qualified CF registry images with accountId",
-    () => {
-      const fullyQualified = `${cfRegistry}/${accountId}/myapp:v1`;
-      expect(resolveImageName(accountId, fullyQualified)).toBe(fullyQualified);
-    },
-  );
+    vitestTest("adds accountId to CF registry images missing accountId", () => {
+      expect(resolveImageName(accountId, `${cfRegistry}/myapp:v1`)).toBe(
+        `${cfRegistry}/${accountId}/myapp:v1`,
+      );
+      expect(
+        resolveImageName(accountId, `${cfRegistry}/session-container:44f030b`),
+      ).toBe(`${cfRegistry}/${accountId}/session-container:44f030b`);
+    });
 
-  vitestTest("passes through external registry images unchanged", () => {
-    expect(resolveImageName(accountId, "docker.io/nginx:1.25")).toBe(
-      "docker.io/nginx:1.25",
+    vitestTest("adds accountId when first segment is not an accountId", () => {
+      expect(
+        resolveImageName(accountId, `${cfRegistry}/some-name/image:tag`),
+      ).toBe(`${cfRegistry}/${accountId}/some-name/image:tag`);
+    });
+
+    vitestTest(
+      "preserves fully-qualified CF registry images with accountId",
+      () => {
+        const fullyQualified = `${cfRegistry}/${accountId}/myapp:v1`;
+        expect(resolveImageName(accountId, fullyQualified)).toBe(
+          fullyQualified,
+        );
+      },
     );
-    expect(resolveImageName(accountId, "ghcr.io/org/image:v1")).toBe(
-      "ghcr.io/org/image:v1",
-    );
-    expect(
-      resolveImageName(
-        accountId,
-        "123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest",
-      ),
-    ).toBe("123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest");
+
+    vitestTest("passes through external registry images unchanged", () => {
+      expect(resolveImageName(accountId, "docker.io/nginx:1.25")).toBe(
+        "docker.io/nginx:1.25",
+      );
+      expect(resolveImageName(accountId, "ghcr.io/org/image:v1")).toBe(
+        "ghcr.io/org/image:v1",
+      );
+      expect(
+        resolveImageName(
+          accountId,
+          "123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest",
+        ),
+      ).toBe("123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest");
+    });
   });
 });
