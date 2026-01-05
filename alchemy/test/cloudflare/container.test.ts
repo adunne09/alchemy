@@ -348,43 +348,43 @@ describe.sequential("Container Resource", () => {
     } finally {
       await destroy(scope);
     }
+  });
 
-    test("throws error when both build and image are specified", async (scope) => {
-      await expect(
-        Container(`${BRANCH_PREFIX}-invalid-container`, {
-          className: "TestContainer",
-          name: "invalid-container",
-          image: "nginx:alpine",
-          build: {
-            context: path.join(import.meta.dirname, "container"),
-          },
-        } as any),
-      ).rejects.toThrow("specify either `build` or `image`, not both");
-    });
+  test("throws error when both build and image are specified", async (scope) => {
+    await expect(
+      Container(`${BRANCH_PREFIX}-invalid-container`, {
+        className: "TestContainer",
+        name: "invalid-container",
+        image: "nginx:alpine",
+        build: {
+          context: path.join(import.meta.dirname, "container"),
+        },
+      } as any),
+    ).rejects.toThrow("specify either `build` or `image`, not both");
+  });
 
-    test("prebuilt CF registry image skips Docker pull (no 401)", async (scope) => {
-      const containerName = `${BRANCH_PREFIX}-prebuilt-cf-image`;
-      const cfRegistry = getCloudflareContainerRegistry();
+  test("prebuilt CF registry image skips Docker pull (no 401)", async (scope) => {
+    const containerName = `${BRANCH_PREFIX}-prebuilt-cf-image`;
+    const cfRegistry = getCloudflareContainerRegistry();
 
-      try {
-        // Use a CF registry image reference - should NOT attempt to pull
-        // This would cause a 401 if pulled, but should pass since we skip the pull
-        const container = await Container(containerName, {
-          className: "TestContainer",
-          name: containerName,
-          image: `${cfRegistry}/${api.accountId}/test-image:v1`,
-          adopt: true,
-        });
+    try {
+      // Use a CF registry image reference - should NOT attempt to pull
+      // This would cause a 401 if pulled, but should pass since we skip the pull
+      const container = await Container(containerName, {
+        className: "TestContainer",
+        name: containerName,
+        image: `${cfRegistry}/${api.accountId}/test-image:v1`,
+        adopt: true,
+      });
 
-        // Verify the image reference is preserved (with normalization)
-        expect(container.image.imageRef).toBe(
-          `${cfRegistry}/${api.accountId}/test-image:v1`,
-        );
-        expect(container.image.build).toBeUndefined();
-      } finally {
-        await destroy(scope);
-      }
-    });
+      // Verify the image reference is preserved (with normalization)
+      expect(container.image.imageRef).toBe(
+        `${cfRegistry}/${api.accountId}/test-image:v1`,
+      );
+      expect(container.image.build).toBeUndefined();
+    } finally {
+      await destroy(scope);
+    }
   });
 
   describe("resolveImageName", () => {
@@ -399,6 +399,18 @@ describe.sequential("Container Resource", () => {
         `${cfRegistry}/${accountId}/my-image:latest`,
       );
     });
+
+    vitestTest(
+      "handles image names containing dots without registry prefix",
+      () => {
+        expect(resolveImageName(accountId, "my.app:v1")).toBe(
+          `${cfRegistry}/${accountId}/my.app:v1`,
+        );
+        expect(resolveImageName(accountId, "my.dotted.image:latest")).toBe(
+          `${cfRegistry}/${accountId}/my.dotted.image:latest`,
+        );
+      },
+    );
 
     vitestTest("adds accountId to CF registry images missing accountId", () => {
       expect(resolveImageName(accountId, `${cfRegistry}/myapp:v1`)).toBe(
@@ -440,4 +452,64 @@ describe.sequential("Container Resource", () => {
       ).toBe("123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:latest");
     });
   });
+});
+
+const localTest = alchemy.test(import.meta, {
+  prefix: BRANCH_PREFIX,
+  local: true,
+});
+
+describe("Container Resource (local dev)", () => {
+  localTest(
+    "pulls CF registry image with auth in local dev mode",
+    async (scope) => {
+      const containerName = `${BRANCH_PREFIX}-cf-image-local-dev`;
+      const cfRegistry = getCloudflareContainerRegistry();
+
+      try {
+        // First, push an image to CF registry (in non-local context)
+        // We'll use an existing image that was pushed by previous tests
+        // or build one fresh and push it
+        const imageRef = `${cfRegistry}/${api.accountId}/${containerName}:latest`;
+
+        // Build and push an image to CF registry first (in non-local mode)
+        const remoteContainer = await alchemy.run(
+          `${containerName}-setup`,
+          {
+            phase: scope.phase,
+            prefix: `${BRANCH_PREFIX}-setup`,
+            quiet: true,
+            local: false,
+          },
+          async () => {
+            return Container(`${containerName}-setup`, {
+              className: "TestContainer",
+              name: containerName,
+              tag: "latest",
+              build: {
+                context: path.join(import.meta.dirname, "container"),
+              },
+              adopt: true,
+            });
+          },
+        );
+
+        // Now test that we can pull this CF registry image in local dev mode
+        const container = await Container(containerName, {
+          className: "TestContainer",
+          name: containerName,
+          image: remoteContainer.image.imageRef,
+          adopt: true,
+        });
+
+        // In local dev mode, the image should be re-tagged to cloudflare-dev/ namespace
+        expect(container.image.imageRef).toMatch(
+          new RegExp(`^cloudflare-dev/${containerName}:latest`),
+        );
+        expect(container.image.name).toBe(`cloudflare-dev/${containerName}`);
+      } finally {
+        await destroy(scope);
+      }
+    },
+  );
 });

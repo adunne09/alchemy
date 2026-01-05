@@ -1,5 +1,10 @@
 import type { Context } from "../context.ts";
-import { Image, type ImageProps } from "../docker/image.ts";
+import {
+  Image,
+  type DockerBuildOptions,
+  type ImageProps,
+} from "../docker/image.ts";
+import type { RemoteImage } from "../docker/remote-image.ts";
 import { Resource } from "../resource.ts";
 import { Scope } from "../scope.ts";
 import { secret } from "../secret.ts";
@@ -8,21 +13,22 @@ import {
   type CloudflareApiOptions,
   createCloudflareApi,
 } from "./api.ts";
+import { DockerApi } from "../docker/api.ts";
 
 /**
- * Properties for creating a Container binding or ContainerApplication
- *
- * Extends ImageProps for Docker image configuration and CloudflareApiOptions
- * for Cloudflare API authentication.
+ * Common properties shared between build and image container configurations
  */
-export interface ContainerProps
-  extends Omit<ImageProps, "registry" | "skipPush">,
-    Partial<CloudflareApiOptions> {
+interface ContainerPropsBase extends Partial<CloudflareApiOptions> {
   /**
    * The class name for the container binding.
    * This is used to identify the container class in Worker bindings.
    */
   className: string;
+
+  /**
+   * Tag for the image (e.g., "latest")
+   */
+  tag?: string;
 
   /**
    * Maximum number of container instances that can be running.
@@ -90,6 +96,75 @@ export interface ContainerProps
    */
   rollout?: ContainerApplicationRollout;
 }
+
+/**
+ * Container configuration using an existing image reference
+ */
+interface ContainerPropsWithImage extends ContainerPropsBase {
+  /**
+   * Name for the container application.
+   *
+   * @default ${app}-${stage}-${id}
+   */
+  name?: string;
+
+  /**
+   * Image name or reference (e.g., "nginx:alpine")
+   *
+   * Use this when you want to deploy an existing image rather than building one.
+   * Cannot be used together with `build`.
+   */
+  image: string | Image | RemoteImage;
+
+  build?: never;
+}
+
+/**
+ * Container configuration that builds a Docker image
+ */
+interface ContainerPropsWithBuild extends ContainerPropsBase {
+  /**
+   * Name for the container application and image repository.
+   *
+   * @default ${app}-${stage}-${id}
+   */
+  name?: string;
+
+  /**
+   * Build configuration for the Docker image.
+   *
+   * Use this when you want to build an image from a Dockerfile.
+   * Cannot be used together with `image`.
+   */
+  build: DockerBuildOptions;
+
+  image?: never;
+}
+
+/**
+ * Properties for creating a Container binding or ContainerApplication
+ *
+ * Either provide `image` to use an existing image, or `build` to build from a Dockerfile.
+ * These options are mutually exclusive.
+ *
+ * @example
+ * // Using an existing image
+ * const container = await Container("my-container", {
+ *   className: "MyContainer",
+ *   image: "nginx:alpine"
+ * });
+ *
+ * @example
+ * // Building from a Dockerfile
+ * const container = await Container("my-container", {
+ *   className: "MyContainer",
+ *   build: {
+ *     context: "./app",
+ *     dockerfile: "Dockerfile"
+ *   }
+ * });
+ */
+export type ContainerProps = ContainerPropsWithImage | ContainerPropsWithBuild;
 
 /**
  * Instance types for Cloudflare Container deployments.
@@ -213,8 +288,8 @@ export function resolveImageName(accountId: string, image: string): string {
   const cfRegistry = getCloudflareContainerRegistry();
 
   // Check if image has a registry prefix (contains a dot in the first segment)
-  const firstSegment = image.split("/")[0];
-  const hasRegistryPrefix = firstSegment.includes(".");
+  const segments = image.split("/");
+  const hasRegistryPrefix = segments.length > 1 && segments[0].includes(".");
 
   if (!hasRegistryPrefix) {
     // Short name like "myapp:v1" → add CF registry + accountId
@@ -289,13 +364,40 @@ export async function Container<T>(
 
     if (isDev) {
       // For local dev with prebuilt images, we need to pull and re-tag
-      // UNLESS it's a Cloudflare registry image (which would 401)
+      const dockerApi = new DockerApi();
+      const devImageRef = `cloudflare-dev/${name}:${tag}`;
+
       if (isCloudflareRegistryLink(rawImageRef)) {
-        throw new Error(
-          `Cannot use Cloudflare registry image "${rawImageRef}" in local development mode. ` +
-            `Either use dev: { remote: true } to deploy to Cloudflare's edge, ` +
-            `or use an external registry image that can be pulled locally.`,
+        // For CF registry images, authenticate before pulling
+        const api = await createCloudflareApi(props);
+        const credentials = await getContainerCredentials(api);
+        const cfRegistry = getCloudflareContainerRegistry();
+
+        await dockerApi.login(
+          cfRegistry,
+          credentials.username || credentials.user!,
+          credentials.password,
         );
+
+        try {
+          // CF Containers run on linux/amd64, so we need to pull that platform
+          await dockerApi.pullImage(rawImageRef, { platform: "linux/amd64" });
+          await dockerApi.tagImage(rawImageRef, devImageRef);
+        } finally {
+          await dockerApi.logout(cfRegistry);
+        }
+
+        return {
+          ...output,
+          image: {
+            kind: "Image",
+            name: `cloudflare-dev/${name}`,
+            imageRef: devImageRef,
+            tag,
+            builtAt: Date.now(),
+            build: undefined,
+          },
+        };
       }
 
       // For external registry images in dev mode, pull and re-tag for Miniflare
@@ -304,9 +406,6 @@ export async function Container<T>(
         tag,
       });
 
-      // Re-tag the image for Miniflare's cloudflare-dev namespace
-      const dockerApi = new (await import("../docker/api.ts")).DockerApi();
-      const devImageRef = `cloudflare-dev/${name}:${tag}`;
       await dockerApi.tagImage(image.imageRef, devImageRef);
 
       return {

@@ -178,10 +178,19 @@ export class DockerApi {
    * Pull Docker image
    *
    * @param image Image name and tag
+   * @param options Pull options
    * @returns Result of the pull command
    */
-  async pullImage(image: string): Promise<{ stdout: string; stderr: string }> {
-    return this.exec(["pull", image]);
+  async pullImage(
+    image: string,
+    options?: { platform?: string },
+  ): Promise<{ stdout: string; stderr: string }> {
+    const args = ["pull"];
+    if (options?.platform) {
+      args.push("--platform", options.platform);
+    }
+    args.push(image);
+    return this.exec(args);
   }
 
   async tagImage(
