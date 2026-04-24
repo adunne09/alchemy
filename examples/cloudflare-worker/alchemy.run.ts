@@ -1,19 +1,30 @@
 import alchemy, { type } from "alchemy";
 import {
+  AiSearch,
   DurableObjectNamespace,
   Queue,
   R2Bucket,
+  R2BucketNotification,
   Worker,
   Workflow,
 } from "alchemy/cloudflare";
+import type { R2BucketNotificationMessage } from "alchemy/cloudflare";
 import fs from "node:fs/promises";
 import type { HelloWorldDO } from "./src/do.ts";
 import type MyRPC from "./src/rpc.ts";
 
-const app = await alchemy("cloudflare-worker");
+export const app = await alchemy("cloudflare-worker", {
+  // Set local: true when NODE_ENV is "test", indicating we are running in unit tests
+  // warning: must be true|undefiend, not true|false, otherwise defaults won't be appplied
+  local: process.env.NODE_ENV === "test" ? true : undefined,
+});
 
 export const bucket = await R2Bucket("bucket", {
   empty: true,
+});
+
+export const rag = await AiSearch("rag", {
+  source: bucket,
 });
 
 export const queue = await Queue<{
@@ -21,6 +32,19 @@ export const queue = await Queue<{
   email: string;
 }>("queue", {
   name: `${app.name}-${app.stage}-queue`,
+});
+
+export const bucketEventsQueue = await Queue<R2BucketNotificationMessage>(
+  "bucket-events-queue",
+  {
+    name: `${app.name}-${app.stage}-bucket-events`,
+  },
+);
+
+await R2BucketNotification("bucket-notifications", {
+  bucket,
+  queue: bucketEventsQueue,
+  eventTypes: ["object-create", "object-delete"],
 });
 
 export const rpc = await Worker("rpc", {
@@ -54,6 +78,7 @@ export const worker = await Worker("worker", {
         batchSize: 10,
       },
     },
+    bucketEventsQueue,
   ],
   bundle: {
     metafile: true,

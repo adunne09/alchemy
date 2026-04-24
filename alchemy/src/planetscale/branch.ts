@@ -83,6 +83,22 @@ export interface BranchProps extends PlanetScaleProps {
    * Enable or disable safe migrations on this branch
    */
   safeMigrations?: boolean;
+
+  /**
+   * The region to create the branch in.
+   * If not provided, the branch will be created in the default region for its database.
+   * On adopt/update, if specified, the actual branch region is validated against this value.
+   *
+   * @see https://planetscale.com/docs/concepts/regions
+   */
+  region?: {
+    /**
+     * The slug identifier of the region (e.g. "us-east", "eu-west", "gcp-us-central1")
+     *
+     * @see https://planetscale.com/docs/concepts/regions#available-regions
+     */
+    slug: string;
+  };
 }
 
 /**
@@ -113,6 +129,20 @@ export interface Branch extends BranchProps {
    * HTML URL to access the branch
    */
   htmlUrl: string;
+
+  /**
+   * The region of the branch as reported by PlanetScale.
+   *
+   * @see https://planetscale.com/docs/concepts/regions
+   */
+  region: {
+    /**
+     * The slug identifier of the region (e.g. "us-east", "eu-west", "gcp-us-central1")
+     *
+     * @see https://planetscale.com/docs/concepts/regions#available-regions
+     */
+    slug: string;
+  };
 }
 
 /**
@@ -205,7 +235,7 @@ export const Branch = Resource(
           path: {
             organization,
             database,
-            name: this.output.name,
+            branch: this.output.name,
           },
           throwOnError: false,
         });
@@ -236,7 +266,7 @@ export const Branch = Resource(
       path: {
         organization,
         database,
-        name: branchName,
+        branch: branchName,
       },
       throwOnError: false,
     });
@@ -258,6 +288,18 @@ export const Branch = Resource(
 
       const data = getResponse.data;
       const currentParentBranch = data.parent_branch || "main";
+
+      // Validate region matches if specified
+      if (props.region) {
+        const actualSlug = data.region.slug;
+        if (actualSlug !== props.region.slug) {
+          throw new Error(
+            `Branch "${branchName}" is in region "${actualSlug}" but expected "${props.region.slug}". ` +
+              `PlanetScale branch regions cannot be changed after creation. ` +
+              `Either update the region in your configuration to match, or create a new branch in the correct region.`,
+          );
+        }
+      }
 
       // Check immutable properties
       if (props.parentBranch && parentBranchName !== currentParentBranch) {
@@ -287,7 +329,7 @@ export const Branch = Resource(
           path: {
             organization,
             database,
-            name: branchName,
+            branch: branchName,
           },
         });
       }
@@ -323,6 +365,7 @@ export const Branch = Resource(
         createdAt: data.created_at,
         updatedAt: data.updated_at,
         htmlUrl: data.html_url,
+        region: { slug: data.region.slug },
       };
     }
     let clusterSize: string | undefined;
@@ -352,6 +395,7 @@ export const Branch = Resource(
         parent_branch: parentBranchName,
         backup_id: props.backupId,
         seed_data: props.seedData,
+        region: props.region?.slug,
         // This is ignored unless props.backupId is provided
         cluster_size: clusterSize,
       },
@@ -367,7 +411,7 @@ export const Branch = Resource(
         path: {
           organization,
           database,
-          name: branchName,
+          branch: branchName,
         },
       });
     }
@@ -391,6 +435,7 @@ export const Branch = Resource(
       createdAt: data.created_at,
       updatedAt: data.updated_at,
       htmlUrl: data.html_url,
+      region: { slug: data.region.slug },
     };
   },
 );

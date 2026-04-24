@@ -3,9 +3,15 @@ import { Resource } from "../resource.ts";
 import type { PlanetScaleProps } from "./api.ts";
 import { createPlanetScaleClient } from "./api.ts";
 import {
+  type DatabaseExtensions,
+  diffExtensions,
+  updateExtensions,
+} from "./database-extensions.ts";
+import {
   ensureProductionBranchClusterSize,
   type PlanetScaleClusterSize,
   sanitizeClusterSize,
+  waitForBranchReady,
   waitForDatabaseReady,
 } from "./utils.ts";
 
@@ -36,59 +42,23 @@ interface BaseDatabaseProps extends PlanetScaleProps {
   delete?: boolean;
 
   /**
-   * The region where the database will be created (create only)
+   * The region where the database will be created (create only).
+   *
+   * @see https://planetscale.com/docs/concepts/regions
    */
   region?: {
     /**
-     * The slug identifier of the region
+     * The slug identifier of the region (e.g. "us-east", "eu-west", "gcp-us-central1")
+     *
+     * @see https://planetscale.com/docs/concepts/regions#available-regions
      */
     slug: string;
   };
 
   /**
-   * Whether to require approval for deployments
+   * The number of replicas for the database. 0 for non-HA, 2+ for HA. (create only)
    */
-  requireApprovalForDeploy?: boolean;
-
-  /**
-   * Whether to allow data branching
-   */
-  allowDataBranching?: boolean;
-
-  /**
-   * Whether to enable automatic migrations
-   */
-  automaticMigrations?: boolean;
-
-  /**
-   * Whether to restrict branch creation to the same region as database
-   */
-  restrictBranchRegion?: boolean;
-
-  /**
-   * Whether to collect full queries from the database
-   */
-  insightsRawQueries?: boolean;
-
-  /**
-   * Whether web console can be used on production branch
-   */
-  productionBranchWebConsole?: boolean;
-
-  /**
-   * The default branch of the database
-   */
-  defaultBranch?: string;
-
-  /**
-   * Migration framework to use on the database
-   */
-  migrationFramework?: string;
-
-  /**
-   * Name of table to use as migration table
-   */
-  migrationTableName?: string;
+  replicas?: number;
 
   /**
    * The database cluster size (required)
@@ -96,31 +66,112 @@ interface BaseDatabaseProps extends PlanetScaleProps {
   clusterSize: PlanetScaleClusterSize;
 
   /**
-   * The engine kind for the database
+   * The engine kind for the database (create only)
    * @default "mysql"
    */
   kind?: "mysql" | "postgresql";
 
   /**
-   * The CPU architecture for the database. Only available for PostgreSQL databases.
+   * Whether or not deploy requests must be approved by a database administrator other than the request creator
+   */
+  requireApprovalForDeploy?: boolean;
+
+  /**
+   * Whether or not to limit branch creation to the same region as the one selected during database creation.
+   */
+  restrictBranchRegion?: boolean;
+
+  /**
+   * Whether or not full queries should be collected from the database
+   */
+  insightsRawQueries?: boolean;
+
+  /**
+   * Whether or not the web console can be used on the production branch of the database
+   */
+  productionBranchWebConsole?: boolean;
+
+  /**
+   * The default branch of the database
+   * @default "main"
+   */
+  defaultBranch?: string;
+}
+
+/**
+ * Properties for creating or updating a PlanetScale MySQL database
+ */
+interface MySQLDatabaseProps extends BaseDatabaseProps {
+  kind?: "mysql";
+
+  /**
+   * Whether or not to copy migration data to new branches and in deploy requests. (Vitess only)
+   */
+  automaticMigrations?: boolean;
+
+  /**
+   * A migration framework to use on the database. (Vitess only)
+   */
+  migrationFramework?: string;
+
+  /**
+   * Name of table to use as migration table for the database. (Vitess only)
+   */
+  migrationTableName?: string;
+
+  /**
+   * Whether or not data branching is allowed on the database. (Vitess only)
+   */
+  allowDataBranching?: boolean;
+
+  /**
+   * Whether or not foreign key constraints are allowed on the database. (Vitess only)
+   */
+  allowForeignKeyConstraints?: boolean;
+}
+
+/**
+ * Properties for creating or updating a PlanetScale PostgreSQL database
+ */
+interface PostgreSQLDatabaseProps extends BaseDatabaseProps {
+  kind: "postgresql";
+
+  /**
+   * The PostgreSQL major version to use for the database. Defaults to the latest available major version. (PostgreSQL only)
+   */
+  majorVersion?: string;
+
+  /**
+   * The CPU architecture for the database (PostgreSQL only)
    */
   arch?: "x86" | "arm";
+
+  /**
+   * PostgreSQL extensions to enable on the default branch.
+   * Each key represents an extension — if present (even as `{}`), it is enabled with the given config or defaults.
+   * If absent, the extension is disabled. (PostgreSQL only)
+   *
+   * @example
+   * ```ts
+   * const db = await Database("my-pg-db", {
+   *   kind: "postgresql",
+   *   organization: "my-org",
+   *   clusterSize: "PS_10",
+   *   extensions: {
+   *     vector: { hnswEfSearch: 100 },
+   *     pgCron: {},
+   *     pgStatStatements: { max: 10000 },
+   *   },
+   * });
+   * ```
+   */
+  extensions?: DatabaseExtensions;
 }
 
 /**
  * Properties for creating or updating a PlanetScale Database
  */
-export type DatabaseProps = BaseDatabaseProps &
-  (
-    | {
-        kind?: "mysql";
-        arch?: undefined;
-      }
-    | {
-        kind: "postgresql";
-        arch?: "x86" | "arm";
-      }
-  );
+export type DatabaseProps = MySQLDatabaseProps | PostgreSQLDatabaseProps;
 
 /**
  * Represents a PlanetScale Database
@@ -170,6 +221,20 @@ export type Database = DatabaseProps & {
    * The organization of the database
    */
   organization: string;
+
+  /**
+   * The region of the database as reported by PlanetScale.
+   *
+   * @see https://planetscale.com/docs/concepts/regions
+   */
+  region: {
+    /**
+     * The slug identifier of the region (e.g. "us-east", "eu-west", "gcp-us-central1")
+     *
+     * @see https://planetscale.com/docs/concepts/regions#available-regions
+     */
+    slug: string;
+  };
 };
 
 /**
@@ -220,7 +285,11 @@ export const Database = Resource(
     const clusterSize = sanitizeClusterSize({
       size: props.clusterSize,
       kind: props.kind,
-      arch: props.arch,
+      ...(props.kind === "postgresql"
+        ? {
+            arch: props.arch,
+          }
+        : {}),
       region: props.region?.slug,
     });
     const organization =
@@ -234,13 +303,14 @@ export const Database = Resource(
         "PlanetScale organization is required. Please set the `organization` property or the `PLANETSCALE_ORGANIZATION` environment variable.",
       );
     }
+    const adopt = props.adopt ?? this.scope.adopt;
     const shouldDelete = props.delete ?? false;
 
     if (this.phase === "update" && this.output.name !== databaseName) {
       await api.updateDatabaseSettings({
         path: {
           organization,
-          name: this.output.name,
+          database: this.output.name,
         },
         body: { new_name: databaseName },
       });
@@ -251,7 +321,7 @@ export const Database = Resource(
         const response = await api.deleteDatabase({
           path: {
             organization,
-            name: this.output.name,
+            database: this.output.name,
           },
           throwOnError: false,
         });
@@ -269,16 +339,59 @@ export const Database = Resource(
     const getResponse = await api.getDatabase({
       path: {
         organization,
-        name: databaseName,
+        database: databaseName,
       },
       throwOnError: false,
     });
-    if (this.phase === "update" || (props.adopt && getResponse.data)) {
+    if (this.phase === "update" || (adopt && getResponse.data)) {
       if (!getResponse.data) {
         throw new Error(`Database "${databaseName}" not found`, {
           cause: getResponse.error,
         });
       }
+
+      // Validate immutable properties match if specified
+      const actualKind = getResponse.data.kind;
+      if (props.kind && actualKind !== props.kind) {
+        throw new Error(
+          `Database "${databaseName}" has kind "${actualKind}" but expected "${props.kind}". ` +
+            `Database kind cannot be changed after creation.`,
+        );
+      }
+
+      if (props.region) {
+        const actualSlug = getResponse.data.region.slug;
+        if (actualSlug !== props.region.slug) {
+          throw new Error(
+            `Database "${databaseName}" is in region "${actualSlug}" but expected "${props.region.slug}". ` +
+              `PlanetScale database regions cannot be changed after creation. ` +
+              `Either update the region in your configuration to match, or create a new database in the correct region.`,
+          );
+        }
+      }
+
+      if (props.kind === "postgresql" && props.arch) {
+        const defaultBranch = props.defaultBranch || "main";
+        const branchInfo = await api.getBranch({
+          path: {
+            organization,
+            database: databaseName,
+            branch: defaultBranch,
+          },
+          throwOnError: false,
+        });
+        if (branchInfo.data?.cluster_architecture) {
+          const actualArch =
+            branchInfo.data.cluster_architecture === "aarch64" ? "arm" : "x86";
+          if (actualArch !== props.arch) {
+            throw new Error(
+              `Database "${databaseName}" has architecture "${actualArch}" but expected "${props.arch}". ` +
+                `Database architecture cannot be changed after creation.`,
+            );
+          }
+        }
+      }
+
       // Update database settings
       // If updating to a non-'main' default branch, create it first
       if (props.defaultBranch && props.defaultBranch !== "main") {
@@ -286,7 +399,7 @@ export const Database = Resource(
           path: {
             organization,
             database: databaseName,
-            name: props.defaultBranch,
+            branch: props.defaultBranch,
           },
           throwOnError: false,
         });
@@ -311,15 +424,20 @@ export const Database = Resource(
       const { data } = await api.updateDatabaseSettings({
         path: {
           organization,
-          name: databaseName,
+          database: databaseName,
         },
         body: {
-          automatic_migrations: props.automaticMigrations,
-          migration_framework: props.migrationFramework,
-          migration_table_name: props.migrationTableName,
+          ...(props.kind !== "postgresql"
+            ? {
+                automatic_migrations: props.automaticMigrations,
+                migration_framework: props.migrationFramework,
+                migration_table_name: props.migrationTableName,
+                allow_foreign_key_constraints: props.allowForeignKeyConstraints,
+                allow_data_branching: props.allowDataBranching,
+              }
+            : {}),
           require_approval_for_deploy: props.requireApprovalForDeploy,
           restrict_branch_region: props.restrictBranchRegion,
-          allow_data_branching: props.allowDataBranching,
           insights_raw_queries: props.insightsRawQueries,
           production_branch_web_console: props.productionBranchWebConsole,
           default_branch: props.defaultBranch,
@@ -335,6 +453,26 @@ export const Database = Resource(
         clusterSize,
       );
 
+      // Sync PostgreSQL extensions on update
+      if (props.kind === "postgresql") {
+        const previousExtensions =
+          this.output?.kind === "postgresql"
+            ? this.output.extensions
+            : undefined;
+        const desiredExtensions = props.extensions;
+        const diff = diffExtensions(previousExtensions, desiredExtensions);
+        if (diff.hasChanges) {
+          const branch = props.defaultBranch || "main";
+          await waitForBranchReady(api, organization, databaseName, branch);
+          await updateExtensions(desiredExtensions ?? {}, {
+            ...props,
+            organization,
+            database: databaseName,
+            branch,
+          });
+        }
+      }
+
       return {
         ...props,
         id: data.id,
@@ -346,6 +484,7 @@ export const Database = Resource(
         updatedAt: data.updated_at,
         htmlUrl: data.html_url,
         organization,
+        region: { slug: data.region.slug },
       };
     }
 
@@ -363,6 +502,12 @@ export const Database = Resource(
         region: props.region?.slug,
         kind: props.kind,
         cluster_size: clusterSize,
+        replicas: props.replicas,
+        ...(props.kind === "postgresql"
+          ? {
+              major_version: props.majorVersion,
+            }
+          : {}),
       },
     });
 
@@ -370,17 +515,22 @@ export const Database = Resource(
     const { data } = await api.updateDatabaseSettings({
       path: {
         organization,
-        name: databaseName,
+        database: databaseName,
       },
       body: {
+        ...(props.kind !== "postgresql"
+          ? {
+              automatic_migrations: props.automaticMigrations,
+              migration_framework: props.migrationFramework,
+              migration_table_name: props.migrationTableName,
+              allow_foreign_key_constraints: props.allowForeignKeyConstraints,
+              allow_data_branching: props.allowDataBranching,
+            }
+          : {}),
         require_approval_for_deploy: props.requireApprovalForDeploy,
-        allow_data_branching: props.allowDataBranching,
-        automatic_migrations: props.automaticMigrations,
         restrict_branch_region: props.restrictBranchRegion,
         insights_raw_queries: props.insightsRawQueries,
         production_branch_web_console: props.productionBranchWebConsole,
-        migration_framework: props.migrationFramework,
-        migration_table_name: props.migrationTableName,
       },
     });
 
@@ -393,7 +543,7 @@ export const Database = Resource(
         path: {
           organization,
           database: databaseName,
-          name: props.defaultBranch,
+          branch: props.defaultBranch,
         },
         throwOnError: false,
       });
@@ -424,12 +574,28 @@ export const Database = Resource(
         const { data: updatedData } = await api.updateDatabaseSettings({
           path: {
             organization,
-            name: databaseName,
+            database: databaseName,
           },
           body: {
             default_branch: props.defaultBranch,
           },
         });
+
+        // Enable PostgreSQL extensions on the new default branch
+        if (props.kind === "postgresql" && props.extensions) {
+          await waitForBranchReady(
+            api,
+            organization,
+            databaseName,
+            props.defaultBranch,
+          );
+          await updateExtensions(props.extensions, {
+            ...props,
+            organization,
+            database: databaseName,
+            branch: props.defaultBranch,
+          });
+        }
 
         return {
           ...props,
@@ -442,8 +608,21 @@ export const Database = Resource(
           updatedAt: updatedData.updated_at,
           htmlUrl: updatedData.html_url,
           organization,
+          region: { slug: updatedData.region.slug },
         };
       }
+    }
+
+    // Enable PostgreSQL extensions on the default branch (main)
+    if (props.kind === "postgresql" && props.extensions) {
+      const branch = props.defaultBranch || "main";
+      await waitForBranchReady(api, organization, databaseName, branch);
+      await updateExtensions(props.extensions, {
+        ...props,
+        organization,
+        database: databaseName,
+        branch,
+      });
     }
 
     return {
@@ -457,6 +636,7 @@ export const Database = Resource(
       updatedAt: data.updated_at,
       htmlUrl: data.html_url,
       organization,
+      region: { slug: data.region.slug },
     };
   },
 );

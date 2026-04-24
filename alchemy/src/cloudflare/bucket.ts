@@ -546,7 +546,9 @@ export async function R2Bucket(
       options?: Pick<R2PutOptions, "httpMetadata">,
     ): Promise<PutR2ObjectResponse> => {
       if (isLocal) {
-        return await (await localBucket()).put(
+        return await (
+          await localBucket()
+        ).put(
           key,
           typeof value === "string"
             ? value
@@ -687,6 +689,13 @@ const _R2Bucket = Resource(
 
     if (this.phase === "delete") {
       if (props.delete !== false) {
+        // Use bucket's actual jurisdiction from output, falling back to props
+        // This ensures EU/FedRAMP buckets are correctly addressed during cleanup
+        const deleteProps: BucketProps = {
+          ...props,
+          jurisdiction: this.output?.jurisdiction ?? props.jurisdiction,
+        };
+
         if (this.output?.catalog) {
           await disableDataCatalog(api, bucketName);
         }
@@ -694,9 +703,9 @@ const _R2Bucket = Resource(
           await deleteMiniflareBinding(this.scope, "r2", this.output.dev.id);
         }
         if (props.empty) {
-          await emptyBucket(api, bucketName, props);
+          await emptyBucket(api, bucketName, deleteProps);
         }
-        await deleteBucket(api, bucketName, props);
+        await deleteBucket(api, bucketName, deleteProps);
       }
       return this.destroy();
     }
@@ -1331,7 +1340,12 @@ function mapHeadersToHttpMetadata(headers: Headers): R2HTTPMetadata {
 
 export async function putObject(
   api: CloudflareApi,
-  { bucketName, key, object, options }: {
+  {
+    bucketName,
+    key,
+    object,
+    options,
+  }: {
     bucketName: string;
     key: string;
     object: PutObjectObject;

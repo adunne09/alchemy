@@ -2,6 +2,7 @@ import path from "pathe";
 import { getPackageManagerRunner } from "../../util/detect-package-manager.ts";
 import type { Assets } from "../assets.ts";
 import type { Bindings } from "../bindings.ts";
+import { withSkipPathValidation } from "../miniflare/paths.ts";
 import {
   spreadBuildProps,
   spreadDevProps,
@@ -10,16 +11,20 @@ import {
 } from "../website.ts";
 import type { Worker } from "../worker.ts";
 
-export interface ViteProps<B extends Bindings> extends WebsiteProps<B> {}
+export interface ViteProps<
+  B extends Bindings,
+  RPC extends Rpc.WorkerEntrypointBranded = Rpc.WorkerEntrypointBranded,
+> extends WebsiteProps<B, RPC> {}
 
-export type Vite<B extends Bindings> = B extends { ASSETS: any }
-  ? never
-  : Worker<B & { ASSETS: Assets }>;
+export type Vite<
+  B extends Bindings,
+  RPC extends Rpc.WorkerEntrypointBranded = Rpc.WorkerEntrypointBranded,
+> = B extends { ASSETS: any } ? never : Worker<B & { ASSETS: Assets }, RPC>;
 
-export async function Vite<B extends Bindings>(
-  id: string,
-  props: ViteProps<B>,
-): Promise<Vite<B>> {
+export async function Vite<
+  B extends Bindings,
+  RPC extends Rpc.WorkerEntrypointBranded = Rpc.WorkerEntrypointBranded,
+>(id: string, props: ViteProps<B, RPC>): Promise<Vite<B, RPC>> {
   const runner = await getPackageManagerRunner();
   let dev = spreadDevProps(props, `${runner} vite dev`);
   let domain = typeof dev === "object" ? dev.domain : undefined;
@@ -34,8 +39,9 @@ export async function Vite<B extends Bindings>(
       port = args[index + 1];
     } else {
       try {
-        const config = await import(
-          path.resolve(props.cwd ?? process.cwd(), "vite.config.ts")
+        const config = await withSkipPathValidation(
+          () =>
+            import(path.resolve(props.cwd ?? process.cwd(), "vite.config.ts")),
         );
         port = config.default?.server?.port ?? 5173;
       } catch {}

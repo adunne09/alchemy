@@ -17,6 +17,7 @@ import { BrowserRendering } from "../../src/cloudflare/browser-rendering.ts";
 import { DispatchNamespace } from "../../src/cloudflare/dispatch-namespace.ts";
 import { Images } from "../../src/cloudflare/images.ts";
 import { Queue } from "../../src/cloudflare/queue.ts";
+import { EmailSender } from "../../src/cloudflare/email-sender.ts";
 import { VectorizeIndex } from "../../src/cloudflare/vectorize-index.ts";
 import { Workflow } from "../../src/cloudflare/workflow.ts";
 import "../../src/test/vitest.ts";
@@ -29,6 +30,35 @@ const esmWorkerScript = `
   export default {
     async fetch(request, env, ctx) {
       return new Response('Hello ESM world!', { status: 200 });
+    }
+  };
+`;
+
+const sendTextEmailWorkerScript = `
+  export default {
+    async fetch(request, env) {
+      await env.EMAIL.send({
+        to: "user@example.com",
+        from: "noreply@example.com",
+        subject: "Plain text test",
+        text: "Hello from Alchemy."
+      });
+      return new Response("sent", { status: 200 });
+    }
+  };
+`;
+
+const sendHtmlEmailWorkerScript = `
+  export default {
+    async fetch(request, env) {
+      await env.EMAIL.send({
+        to: "user@example.com",
+        from: "noreply@example.com",
+        subject: "HTML test",
+        html: "<h1>Hello from Alchemy.</h1><p>This is an HTML email.</p>",
+        text: "Hello from Alchemy. This is an HTML email."
+      });
+      return new Response("sent", { status: 200 });
     }
   };
 `;
@@ -256,6 +286,105 @@ describe("WranglerJson Resource", () => {
       }
     });
 
+    test("with send email binding", async (scope) => {
+      const name = `${BRANCH_PREFIX}-test-worker-send-email`;
+      const tempDir = path.join(".out", "alchemy-send-email-test");
+      const entrypoint = path.join(tempDir, "worker.ts");
+
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.mkdir(tempDir, { recursive: true });
+        await fs.writeFile(entrypoint, esmWorkerScript);
+
+        const worker = await Worker(name, {
+          name,
+          format: "esm",
+          entrypoint,
+          bindings: {
+            EMAIL: EmailSender({
+              allowedSenderAddresses: ["noreply@example.com"],
+              dev: { remote: true },
+            }),
+          },
+          adopt: true,
+        });
+
+        const { spec } = await WranglerJson({ worker });
+
+        expect(spec).toMatchObject({
+          name,
+          send_email: [
+            {
+              name: "EMAIL",
+              allowed_sender_addresses: ["noreply@example.com"],
+              remote: true,
+            },
+          ],
+        });
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await destroy(scope);
+      }
+    });
+
+    test("with send email binding for plain text and html payloads", async (scope) => {
+      const cases = [
+        {
+          name: `${BRANCH_PREFIX}-test-worker-send-email-text`,
+          tempDir: path.join(".out", "alchemy-send-email-text-test"),
+          script: sendTextEmailWorkerScript,
+        },
+        {
+          name: `${BRANCH_PREFIX}-test-worker-send-email-html`,
+          tempDir: path.join(".out", "alchemy-send-email-html-test"),
+          script: sendHtmlEmailWorkerScript,
+        },
+      ];
+
+      try {
+        for (const testCase of cases) {
+          await fs.rm(testCase.tempDir, { recursive: true, force: true });
+          await fs.mkdir(testCase.tempDir, { recursive: true });
+
+          const entrypoint = path.join(testCase.tempDir, "worker.ts");
+          await fs.writeFile(entrypoint, testCase.script);
+
+          const worker = await Worker(testCase.name, {
+            name: testCase.name,
+            format: "esm",
+            entrypoint,
+            bindings: {
+              EMAIL: EmailSender({
+                allowedSenderAddresses: ["noreply@example.com"],
+                dev: { remote: true },
+              }),
+            },
+            adopt: true,
+          });
+
+          const { spec } = await WranglerJson({ worker });
+
+          expect(spec).toMatchObject({
+            name: testCase.name,
+            send_email: [
+              {
+                name: "EMAIL",
+                allowed_sender_addresses: ["noreply@example.com"],
+                remote: true,
+              },
+            ],
+          });
+        }
+      } finally {
+        await Promise.all(
+          cases.map(async (testCase) => {
+            await fs.rm(testCase.tempDir, { recursive: true, force: true });
+          }),
+        );
+        await destroy(scope);
+      }
+    });
+
     test("with durable object bindings", async (scope) => {
       const name = `${BRANCH_PREFIX}-test-worker-do`;
       const tempDir = path.join(".out", "alchemy-do-test");
@@ -375,6 +504,51 @@ describe("WranglerJson Resource", () => {
           binding: "WF",
           class_name: "TestWorkflow",
           script_name: "other-script",
+        });
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await destroy(scope);
+      }
+    });
+
+    test("with workflow step limits", async (scope) => {
+      const name = `${BRANCH_PREFIX}-test-worker-wf-limits`;
+      const tempDir = path.join(".out", "alchemy-wf-limits-test");
+      const entrypoint = path.join(tempDir, "worker.ts");
+
+      try {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.mkdir(tempDir, { recursive: true });
+        await fs.writeFile(entrypoint, wfWorkerScript);
+
+        const workflow = Workflow("test-workflow-limits", {
+          className: "TestWorkflow",
+          workflowName: "test-workflow-limits",
+          limits: {
+            steps: 25000,
+          },
+        });
+
+        const worker = await Worker(name, {
+          name,
+          format: "esm",
+          entrypoint,
+          bindings: {
+            WF: workflow,
+          },
+          adopt: true,
+        });
+
+        const { spec } = await WranglerJson({ worker });
+
+        expect(spec.workflows).toHaveLength(1);
+        expect(spec.workflows?.[0]).toMatchObject({
+          name: "test-workflow-limits",
+          binding: "WF",
+          class_name: "TestWorkflow",
+          limits: {
+            steps: 25000,
+          },
         });
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
@@ -757,6 +931,240 @@ describe("WranglerJson Resource", () => {
     }
   });
 
+  test("with subrequests limit", async (scope) => {
+    const name = `${BRANCH_PREFIX}-test-worker-subrequests-limit`;
+    const tempDir = path.join(".out", "alchemy-subrequests-limit-test");
+    const entrypoint = path.join(tempDir, "worker.ts");
+
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(entrypoint, esmWorkerScript);
+
+      const { spec } = await WranglerJson({
+        worker: {
+          name,
+          format: "esm",
+          entrypoint,
+          limits: {
+            subrequests: 50_000,
+          },
+        },
+      });
+
+      expect(spec).toMatchObject({
+        name,
+        limits: {
+          cpu_ms: 30_000,
+          subrequests: 50_000,
+        },
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await destroy(scope);
+    }
+  });
+
+  test("with cpu_ms and subrequests limits", async (scope) => {
+    const name = `${BRANCH_PREFIX}-test-worker-both-limits`;
+    const tempDir = path.join(".out", "alchemy-both-limits-test");
+    const entrypoint = path.join(tempDir, "worker.ts");
+
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(entrypoint, esmWorkerScript);
+
+      const { spec } = await WranglerJson({
+        worker: {
+          name,
+          format: "esm",
+          entrypoint,
+          limits: {
+            cpu_ms: 1_000,
+            subrequests: 10,
+          },
+        },
+      });
+
+      expect(spec).toMatchObject({
+        name,
+        limits: {
+          cpu_ms: 1_000,
+          subrequests: 10,
+        },
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await destroy(scope);
+    }
+  });
+
+  test("with placement region hint (AWS)", async (scope) => {
+    const name = `${BRANCH_PREFIX}-test-worker-placement-region`;
+    const tempDir = path.join(".out", "alchemy-placement-region-test");
+    const entrypoint = path.join(tempDir, "worker.ts");
+
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(entrypoint, esmWorkerScript);
+
+      const { spec } = await WranglerJson({
+        worker: {
+          name,
+          format: "esm",
+          entrypoint,
+          placement: {
+            region: "aws:us-east-1",
+          },
+        },
+      });
+
+      expect(spec).toMatchObject({
+        name,
+        placement: {
+          region: "aws:us-east-1",
+        },
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await destroy(scope);
+    }
+  });
+
+  test("with placement region hint (GCP)", async (scope) => {
+    const name = `${BRANCH_PREFIX}-test-worker-placement-gcp`;
+    const tempDir = path.join(".out", "alchemy-placement-gcp-test");
+    const entrypoint = path.join(tempDir, "worker.ts");
+
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(entrypoint, esmWorkerScript);
+
+      const { spec } = await WranglerJson({
+        worker: {
+          name,
+          format: "esm",
+          entrypoint,
+          placement: {
+            region: "gcp:us-east4",
+          },
+        },
+      });
+
+      expect(spec).toMatchObject({
+        name,
+        placement: {
+          region: "gcp:us-east4",
+        },
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await destroy(scope);
+    }
+  });
+
+  test("with placement region hint (Azure)", async (scope) => {
+    const name = `${BRANCH_PREFIX}-test-worker-placement-azure`;
+    const tempDir = path.join(".out", "alchemy-placement-azure-test");
+    const entrypoint = path.join(tempDir, "worker.ts");
+
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(entrypoint, esmWorkerScript);
+
+      const { spec } = await WranglerJson({
+        worker: {
+          name,
+          format: "esm",
+          entrypoint,
+          placement: {
+            region: "azure:westeurope",
+          },
+        },
+      });
+
+      expect(spec).toMatchObject({
+        name,
+        placement: {
+          region: "azure:westeurope",
+        },
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await destroy(scope);
+    }
+  });
+
+  test("with placement host hint (layer 4 TCP)", async (scope) => {
+    const name = `${BRANCH_PREFIX}-test-worker-placement-host`;
+    const tempDir = path.join(".out", "alchemy-placement-host-test");
+    const entrypoint = path.join(tempDir, "worker.ts");
+
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(entrypoint, esmWorkerScript);
+
+      const { spec } = await WranglerJson({
+        worker: {
+          name,
+          format: "esm",
+          entrypoint,
+          placement: {
+            host: "my-database.example.com:5432",
+          },
+        },
+      });
+
+      expect(spec).toMatchObject({
+        name,
+        placement: {
+          host: "my-database.example.com:5432",
+        },
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await destroy(scope);
+    }
+  });
+
+  test("with placement hostname hint (layer 7 HTTP)", async (scope) => {
+    const name = `${BRANCH_PREFIX}-test-worker-placement-hostname`;
+    const tempDir = path.join(".out", "alchemy-placement-hostname-test");
+    const entrypoint = path.join(tempDir, "worker.ts");
+
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.mkdir(tempDir, { recursive: true });
+      await fs.writeFile(entrypoint, esmWorkerScript);
+
+      const { spec } = await WranglerJson({
+        worker: {
+          name,
+          format: "esm",
+          entrypoint,
+          placement: {
+            hostname: "my-api.example.com",
+          },
+        },
+      });
+
+      expect(spec).toMatchObject({
+        name,
+        placement: {
+          hostname: "my-api.example.com",
+        },
+      });
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await destroy(scope);
+    }
+  });
+
   test("with queue event source - uses queue name instead of ID", async (scope) => {
     const name = `${BRANCH_PREFIX}-test-worker-queue-event-source`;
     const tempDir = path.join(".out", "alchemy-queue-event-source-test");
@@ -850,7 +1258,7 @@ describe("WranglerJson Resource", () => {
   test("create worker with subdomain binding", async (scope) => {
     const workerName = `${BRANCH_PREFIX}-test-worker-subdomain-binding`;
 
-    const tempDir = path.join(".out", "alchemy-direct-queue-test");
+    const tempDir = path.join(".out", "alchemy-subdomain-binding-test");
     const entrypoint = path.join(tempDir, "worker.ts");
 
     let worker: Worker | undefined;

@@ -1,4 +1,5 @@
 import type { Context } from "../context.ts";
+import { DockerApi } from "../docker/api.ts";
 import {
   Image,
   type DockerBuildOptions,
@@ -9,11 +10,10 @@ import { Resource } from "../resource.ts";
 import { Scope } from "../scope.ts";
 import { secret } from "../secret.ts";
 import {
+  createCloudflareApi,
   type CloudflareApi,
   type CloudflareApiOptions,
-  createCloudflareApi,
 } from "./api.ts";
-import { DockerApi } from "../docker/api.ts";
 
 /**
  * Common properties shared between build and image container configurations
@@ -628,6 +628,14 @@ export interface ContainerApplicationProps extends CloudflareApiOptions {
   adopt?: boolean;
 
   /**
+   * Whether to delete the container application when removed from Alchemy.
+   * If set to false, the container application will remain but the resource will be removed from state.
+   *
+   * @default true
+   */
+  delete?: boolean;
+
+  /**
    * If true, the container application will not be created, but will be retained if it already exists.
    * This is used for local development.
    *
@@ -774,7 +782,7 @@ export const ContainerApplication = Resource(
 
     const api = await createCloudflareApi(props);
     if (this.phase === "delete") {
-      if (this.output?.id) {
+      if (props.delete !== false && this.output?.id) {
         // Delete the container application
         await deleteContainerApplication(api, this.output.id);
       }
@@ -1108,7 +1116,7 @@ export async function createContainerApplication(
     return result.result;
   }
 
-  const error = result.errors.find((e) => e.code === 1000);
+  const error = result.errors.find((e) => e.code === 1608);
   if (error) {
     // WEIRD: json-encoded error message - might change when they release an official API
     const errorMessage = JSON.parse(error.message) as {
@@ -1156,7 +1164,7 @@ export async function createContainerApplication(
   }
 
   throw Error(
-    `Failed to create container application: ${result.errors?.map((e: { message: string }) => e.message).join(", ") ?? "Unknown error"}`,
+    `Failed to create container application: ${result.errors?.map((e) => `[${e.code}] ${e.message}`).join(", ") ?? "Unknown error"}`,
   );
 }
 type Region =

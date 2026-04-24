@@ -1,84 +1,138 @@
 name: Release NPM Package
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+      version-override:
+        description: "Exact version override (e.g. 0.89.0). Leave empty to use bump type."
+        required: false
+        type: string
+      skip-github-release:
+        description: "Skip creating git tag and GitHub release"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
-  pull-requests: write
   id-token: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    if: startsWith(github.event.head_commit.message, 'chore(release):')
     steps:
       - uses: actions/checkout@v4
         with:
+          filter: blob:none
           fetch-depth: 0
+          fetch-tags: true
 
-      - name: Extract version from commit message
-        id: version
-        run: |
-          VERSION=$(echo "${{ github.event.head_commit.message }}" | sed -E 's/^chore\(release\): //')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Create and push tag
-        if: steps.version.outputs.version != ''
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          # Check if tag exists before creating
-          if ! git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-            git push --tags
-          else
-            echo "Tag v${{ steps.version.outputs.version }} already exists, skipping creation"
-          fi
-
-      - name: Set node
+      - name: Setup Node
         uses: actions/setup-node@v4
-        if: steps.version.outputs.version != ''
         with:
           registry-url: https://registry.npmjs.org/
-          node-version: 22
+          node-version: 24
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
-        if: steps.version.outputs.version != ''
         with:
           bun-version: latest
 
       - name: Install dependencies
-        if: steps.version.outputs.version != ''
+        shell: bash
+        run: |
+          bun install
+
+      - name: Upgrade npm for OIDC trusted publishing
+        run: |
+          npm install -g npm@latest && npm --version
+          sed -i '/always-auth/d' ~/.npmrc 2>/dev/null || true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
         run: bun install
 
-      - name: Create GitHub Release
-        if: steps.version.outputs.version != ''
+      - name: Configure git identity
         run: |
-          # Check if release exists before creating
-          if ! gh release view "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            bunx changelogithub
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+      - name: Bump version
+        id: bump
+        run: |
+          if [ -n "${{ inputs.version-override }}" ]; then
+            bun ./scripts/bump.ts "${{ inputs.version-override }}"
+            VERSION="${{ inputs.version-override }}"
           else
-            echo "Release v${{ steps.version.outputs.version }} already exists, skipping creation"
+            bun ./scripts/bump.ts "${{ inputs.bump }}"
+            VERSION=$(node -p "require('./alchemy/package.json').version")
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Push version commit
+        run: git push
+
+      - name: Capture commit SHA
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        if: ${{ !inputs.skip-github-release }}
+        run: |
+          git tag -a "v${{ steps.bump.outputs.version }}" -m "Release v${{ steps.bump.outputs.version }}"
+          git push --tags
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.skip-github-release }}
+        run: |
+          if ! gh release view "v${{ steps.bump.outputs.version }}" >/dev/null 2>&1; then
+            PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+            if [ -n "$PREV_TAG" ]; then
+              bunx changelogithub --from "$PREV_TAG"
+            else
+              bunx changelogithub --from "v${{ steps.bump.outputs.version }}"
+            fi
+          else
+            echo "Release v${{ steps.bump.outputs.version }} already exists, skipping"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create NPM Release
-        if: steps.version.outputs.version != ''
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: true
+      - name: Build
+        run: bun run build
+        working-directory: alchemy
+
+      - name: Publish to NPM
         run: |
-          # Configure npm token for both npm and bun
-          npm config set '//registry.npmjs.org/:_authToken' "${NODE_AUTH_TOKEN}"
-          if ! npm view "alchemy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
-            # Bun respects NPM_CONFIG_TOKEN for auth; also pass provenance
-            export NPM_CONFIG_TOKEN="${NODE_AUTH_TOKEN}"
-            bun run publish:npm
-          else
-            echo "Version ${{ steps.version.outputs.version }} already published to npm, skipping publish"
+          VERSION="${{ steps.bump.outputs.version }}"
+          PKG_NAME=$(node -p "require('./alchemy/package.json').name")
+          echo "--- Publishing ${PKG_NAME}@${VERSION} ---"
+
+          if npm view "${PKG_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${PKG_NAME}@${VERSION} already published, skipping"
+            exit 0
           fi
+
+          cd alchemy
+          cp ../README.md .
+          bun pm pack --destination .
+          TARBALL=$(ls *.tgz 2>/dev/null | head -1)
+          echo "Publishing tarball: ${TARBALL}"
+          TAG="latest"
+          if echo "${VERSION}" | grep -q '-'; then
+            TAG="next"
+          fi
+          npm publish "${TARBALL}" --access public --tag "${TAG}"
+          rm -f *.tgz README.md
+          echo "--- Published ${PKG_NAME}@${VERSION} ---"

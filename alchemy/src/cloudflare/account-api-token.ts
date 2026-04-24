@@ -109,6 +109,12 @@ export interface AccountApiTokenProps extends CloudflareApiOptions {
    * Optional conditions for token use (like IP restrictions)
    */
   condition?: TokenCondition;
+
+  /**
+   * Whether to delete the token when removed from Alchemy
+   * @default true
+   */
+  delete?: boolean;
 }
 
 /**
@@ -261,7 +267,7 @@ export const AccountApiToken = Resource(
 
     if (this.phase === "delete") {
       // Delete token if we have an ID
-      if (this.output?.id) {
+      if (this.output?.id && props.delete !== false) {
         try {
           const deleteResponse = await api.delete(
             `/accounts/${api.accountId}/tokens/${this.output.id}`,
@@ -360,11 +366,22 @@ export const AccountApiToken = Resource(
       }));
 
       throw new Error(
-        `Error ${
-          this.phase === "update" ? "updating" : "creating"
-        } token '${tokenName}': ${
-          errorData.errors?.[0]?.message || response.statusText
-        }`,
+        [
+          `Error ${
+            this.phase === "update" ? "updating" : "creating"
+          } token '${tokenName}' (${response.status}): ${
+            errorData.errors?.[0]?.message || response.statusText
+          }`,
+          ...(api.credentials.type !== "api-key"
+            ? [
+                `\nTo create an Account API Token, you must use a Global API Key or an API Token with the "Account API Tokens Write" permission.`,
+              ]
+            : []),
+          ...(api.credentials.type === "oauth"
+            ? ["OAuth credentials are not supported."]
+            : []),
+          "See https://alchemy.run/guides/cloudflare/ for more details.",
+        ].join("\n"),
       );
     }
 

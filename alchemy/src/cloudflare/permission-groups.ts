@@ -99,6 +99,12 @@ export const PERMISSION_GROUPS = [
     scopes: ["com.cloudflare.api.account"],
   },
   {
+    id: "9e9b428a0bcd46fd80e580b46a69963c",
+    name: "AI Search Index Engine",
+    description: "Grants access to run AI Search Index Engine",
+    scopes: ["com.cloudflare.api.account"],
+  },
+  {
     id: "644535f4ed854494a59cb289d634b257",
     name: "AI Gateway Run",
     description: "Grants access to run AI Gateways",

@@ -162,6 +162,7 @@ async function createBunSQLiteDatabase(
     create: true,
     ...bunOptions,
   });
+  client.exec("PRAGMA busy_timeout = 5000;");
   client.exec("PRAGMA journal_mode = WAL;");
   const db = drizzle(client, {
     schema,
@@ -192,6 +193,7 @@ async function createLibSQLDatabase(
   const { migrate } = await import("drizzle-orm/libsql/migrator");
   const schema = await import("./schema.js");
   const client = createClient({ url, ...options });
+  await client.execute("PRAGMA busy_timeout = 5000;");
   await client.execute("PRAGMA journal_mode = WAL;");
   const db = drizzle(client, {
     schema,

@@ -6,6 +6,8 @@ import { Resource } from "../resource.ts";
 import { Scope } from "../scope.ts";
 import { isSecret } from "../secret.ts";
 import { assertNever } from "../util/assert-never.ts";
+import { isAiSearchNamespace } from "./ai-search-namespace.ts";
+import { isAiSearch } from "./ai-search.ts";
 import { createCloudflareApi } from "./api.ts";
 import type { Bindings } from "./bindings.ts";
 import { getCloudflareRegistryWithAccountNamespace } from "./container.ts";
@@ -164,6 +166,7 @@ export async function WranglerJson(
     limits: worker.limits
       ? {
           cpu_ms: worker.limits.cpu_ms ?? 30_000,
+          subrequests: worker.limits.subrequests,
         }
       : undefined,
     logpush: worker.logpush,
@@ -262,6 +265,7 @@ async function processBindings(
   const durableObjects: WranglerJsonConfig["durable_objects"]["bindings"] = [];
   const r2Buckets: WranglerJsonConfig["r2_buckets"] = [];
   const services: WranglerJsonConfig["services"] = [];
+  const sendEmailBindings: WranglerJsonConfig["send_email"] = [];
   const secrets: string[] = [];
   const workflows: WranglerJsonConfig["workflows"] = [];
   const d1Databases: WranglerJsonConfig["d1_databases"] = [];
@@ -286,6 +290,9 @@ async function processBindings(
   const ratelimits: WranglerJsonConfig["ratelimits"] = [];
   const containers: WranglerJsonConfig["containers"] = [];
   const workerLoaders: WranglerJsonConfig["worker_loaders"] = [];
+  const vpcServices: WranglerJsonConfig["vpc_services"] = [];
+  const aiSearchInstances: WranglerJsonConfig["ai_search"] = [];
+  const aiSearchNamespaces: WranglerJsonConfig["ai_search_namespaces"] = [];
 
   for (const eventSource of eventSources ?? []) {
     if (isQueueEventSource(eventSource)) {
@@ -318,6 +325,26 @@ async function processBindings(
     } else if (writeSecrets && isSecret(binding)) {
       spec.vars ??= {};
       spec.vars[bindingName] = binding as any;
+    } else if (isAiSearch(binding)) {
+      // AI Search discriminates via ResourceKind (isAiSearch) rather than
+      // binding.type — `AiSearch.type` is the *source* type ("r2" |
+      // "web-crawler") and so would collide with `r2_bucket` string
+      // matching below. Checking here at the top of the chain mirrors the
+      // ordering in worker-metadata.ts.
+      aiSearchInstances.push({
+        binding: bindingName,
+        instance_name: binding.name,
+        // AI Search is not natively supported by Miniflare — emitting
+        // `remote: true` lets `wrangler dev` proxy to the deployed
+        // instance (matches vectorize / browser / ai / vpc_service).
+        remote: true,
+      });
+    } else if (isAiSearchNamespace(binding)) {
+      aiSearchNamespaces.push({
+        binding: bindingName,
+        namespace: binding.namespace,
+        remote: true,
+      });
     } else if (binding.type === "cloudflare::Worker::Self") {
       // Self(service) binding
       services.push({
@@ -387,6 +414,14 @@ async function processBindings(
           binding.jurisdiction === "default" ? undefined : binding.jurisdiction,
         ...(binding.dev?.remote ? { remote: true } : {}),
       });
+    } else if (binding.type === "send_email") {
+      sendEmailBindings.push({
+        name: bindingName,
+        destination_address: binding.destinationAddress,
+        allowed_destination_addresses: binding.allowedDestinationAddresses,
+        allowed_sender_addresses: binding.allowedSenderAddresses,
+        ...(binding.dev?.remote ? { remote: true } : {}),
+      });
     } else if (binding.type === "secret") {
       // Secret binding
       secrets.push(bindingName);
@@ -401,6 +436,7 @@ async function processBindings(
         binding: bindingName,
         class_name: binding.className,
         script_name: binding.scriptName,
+        ...(binding.limits ? { limits: binding.limits } : {}),
       });
     } else if (binding.type === "d1") {
       const id =
@@ -535,6 +571,12 @@ async function processBindings(
       workerLoaders.push({
         binding: bindingName,
       });
+    } else if (binding.type === "vpc_service") {
+      vpcServices.push({
+        binding: bindingName,
+        service_id: binding.serviceId,
+        remote: true,
+      });
     } else {
       console.log("binding", binding);
       return assertNever(binding);
@@ -558,6 +600,14 @@ async function processBindings(
 
   if (services.length > 0) {
     spec.services = services;
+  }
+
+  if (sendEmailBindings.length > 0) {
+    (
+      spec as WranglerJsonSpec & {
+        send_email?: typeof sendEmailBindings;
+      }
+    ).send_email = sendEmailBindings;
   }
 
   if (d1Databases.length > 0) {
@@ -619,5 +669,13 @@ async function processBindings(
 
   if (workerLoaders.length > 0) {
     spec.worker_loaders = workerLoaders;
+  }
+
+  if (aiSearchInstances.length > 0) {
+    spec.ai_search = aiSearchInstances;
+  }
+
+  if (aiSearchNamespaces.length > 0) {
+    spec.ai_search_namespaces = aiSearchNamespaces;
   }
 }

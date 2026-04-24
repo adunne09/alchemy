@@ -4,6 +4,8 @@ import { assertNever } from "../../util/assert-never.ts";
 import { reservePort } from "../../util/find-open-port.ts";
 import type { HTTPServer } from "../../util/http.ts";
 import { logger } from "../../util/logger.ts";
+import { isAiSearchNamespace } from "../ai-search-namespace.ts";
+import { isAiSearch } from "../ai-search.ts";
 import type { CloudflareApi } from "../api.ts";
 import type {
   Binding,
@@ -31,29 +33,31 @@ export interface MiniflareWorkerInput {
   cwd: string;
 }
 
-type RemoteOnlyBindingType =
-  | "ai"
-  | "browser"
-  | "dispatch_namespace"
-  | "mtls_certificate"
-  | "vectorize";
-type RemoteOptionalBindingType =
-  | "d1"
-  | "images"
-  | "kv_namespace"
-  | "queue"
-  | "r2_bucket";
-
 type RemoteBinding =
+  // Supported remote bindings that are NOT a fetcher require the `raw` flag.
   | (Extract<
       WorkerBindingSpec,
       {
-        type: RemoteOnlyBindingType | RemoteOptionalBindingType;
+        type:
+          | "ai"
+          | "ai_search"
+          | "ai_search_namespace"
+          | "browser"
+          | "dispatch_namespace"
+          | "mtls_certificate"
+          | "vectorize"
+          | "d1"
+          | "images"
+          | "kv_namespace"
+          | "queue"
+          | "r2_bucket";
       }
-    > & {
-      raw: true;
-    })
-  | WorkerBindingService;
+    > & { raw: true })
+  // Fetcher type bindings do not require the `raw` flag and will throw an error if it is present.
+  | Extract<
+      WorkerBindingSpec,
+      { type: "send_email" | "service" | "vpc_service" }
+    >;
 
 type BaseWorkerOptions = {
   [K in keyof miniflare.WorkerOptions]: K extends
@@ -88,6 +92,29 @@ export const buildWorkerOptions = async (
   for (const [key, binding] of Object.entries(input.bindings ?? {})) {
     if (typeof binding === "string") {
       (options.bindings ??= {})[key] = binding;
+      continue;
+    }
+    if (isAiSearch(binding)) {
+      // AI Search instance bindings are not supported natively by Miniflare;
+      // proxy them to the deployed instance (same mechanism used by `ai`,
+      // `vectorize`, etc.). Instance bindings are always scoped to the
+      // default namespace on the CF side, so the namespace need not be
+      // surfaced in the remote-proxy metadata.
+      remoteBindings.push({
+        type: "ai_search",
+        name: key,
+        instance_name: binding.name,
+        raw: true,
+      });
+      continue;
+    }
+    if (isAiSearchNamespace(binding)) {
+      remoteBindings.push({
+        type: "ai_search_namespace",
+        name: key,
+        namespace: binding.namespace,
+        raw: true,
+      });
       continue;
     }
     if (binding.type === "cloudflare::Worker::Self") {
@@ -264,6 +291,36 @@ export const buildWorkerOptions = async (
         (options.bindings ??= {})[key] = binding.unencrypted;
         break;
       }
+      case "send_email": {
+        const config = {
+          name: key,
+          destination_address: binding.destinationAddress,
+          allowed_destination_addresses: binding.allowedDestinationAddresses,
+          allowed_sender_addresses: binding.allowedSenderAddresses,
+        };
+        if (isRemoteBinding(binding)) {
+          remoteBindings.push({
+            type: "send_email",
+            ...config,
+          });
+        } else {
+          ((
+            options as BaseWorkerOptions & {
+              email?: {
+                send_email?: Array<typeof config>;
+              };
+            }
+          ).email ??= {}).send_email ??= [];
+          (
+            options as BaseWorkerOptions & {
+              email: {
+                send_email: Array<typeof config>;
+              };
+            }
+          ).email.send_email.push(config);
+        }
+        break;
+      }
       case "secret_key": {
         throw new Error("Secret keys are not supported in local mode");
       }
@@ -322,6 +379,15 @@ export const buildWorkerOptions = async (
           tag: "",
           timestamp: "0",
         };
+        break;
+      }
+      case "vpc_service": {
+        remoteBindings.push({
+          type: "vpc_service",
+          name: key,
+          service_name: binding.name,
+          service_id: binding.serviceId,
+        });
         break;
       }
       case "worker_loader": {
@@ -435,6 +501,41 @@ export const buildWorkerOptions = async (
             remoteProxyConnectionString: remoteProxy.connectionString,
           };
           break;
+        case "send_email":
+          ((
+            options as BaseWorkerOptions & {
+              email?: {
+                send_email?: Array<{
+                  name: string;
+                  destination_address?: string;
+                  allowed_destination_addresses?: string[];
+                  allowed_sender_addresses?: string[];
+                  remoteProxyConnectionString: typeof remoteProxy.connectionString;
+                }>;
+              };
+            }
+          ).email ??= {}).send_email ??= [];
+          (
+            options as BaseWorkerOptions & {
+              email: {
+                send_email: Array<{
+                  name: string;
+                  destination_address?: string;
+                  allowed_destination_addresses?: string[];
+                  allowed_sender_addresses?: string[];
+                  remoteProxyConnectionString: typeof remoteProxy.connectionString;
+                }>;
+              };
+            }
+          ).email.send_email.push({
+            name: binding.name,
+            destination_address: binding.destination_address,
+            allowed_destination_addresses:
+              binding.allowed_destination_addresses,
+            allowed_sender_addresses: binding.allowed_sender_addresses,
+            remoteProxyConnectionString: remoteProxy.connectionString,
+          });
+          break;
         case "service":
           (options.serviceBindings ??= {})[binding.name] = {
             name: binding.name,
@@ -444,6 +545,24 @@ export const buildWorkerOptions = async (
         case "vectorize":
           (options.vectorize ??= {})[binding.name] = {
             index_name: binding.index_name,
+            remoteProxyConnectionString: remoteProxy.connectionString,
+          };
+          break;
+        case "vpc_service":
+          (options.vpcServices ??= {})[binding.name] = {
+            service_id: binding.service_id,
+            remoteProxyConnectionString: remoteProxy.connectionString,
+          };
+          break;
+        case "ai_search":
+          (options.aiSearchInstances ??= {})[binding.name] = {
+            instance_name: binding.instance_name,
+            remoteProxyConnectionString: remoteProxy.connectionString,
+          };
+          break;
+        case "ai_search_namespace":
+          (options.aiSearchNamespaces ??= {})[binding.name] = {
+            namespace: binding.namespace,
             remoteProxyConnectionString: remoteProxy.connectionString,
           };
           break;

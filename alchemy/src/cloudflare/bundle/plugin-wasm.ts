@@ -1,6 +1,8 @@
 import type esbuild from "esbuild";
 import assert from "node:assert";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "pathe";
 import type { WorkerBundle } from "../worker-bundle.ts";
 
@@ -21,9 +23,27 @@ export function createWasmPlugin() {
           return { path: resolved.path, external: true };
         }
 
-        // Resolve path to source file, excluding the `?module` suffix (uses path.resolve in case args.path is already absolute)
+        // Resolve path to source file, excluding the `?module` suffix
         const normalizedPath = path.normalize(args.path).replace(/\?.*$/, "");
-        const copyFrom = path.resolve(args.resolveDir, normalizedPath);
+
+        // Determine the source file: use Node module resolution for bare specifiers (npm packages),
+        // otherwise resolve relative to the importing file's directory
+        let copyFrom: string;
+        if (/^[./]/.test(normalizedPath)) {
+          copyFrom = path.resolve(args.resolveDir, normalizedPath);
+        } else {
+          try {
+            // createRequire needs a file path to anchor node_modules resolution from.
+            // The filename is a dummy — only the directory matters.
+            const esmRequire = createRequire(
+              path.join(args.resolveDir, "noop.js"),
+            );
+            copyFrom = esmRequire.resolve(normalizedPath);
+          } catch {
+            // Fall back to the original behavior if require.resolve fails
+            copyFrom = path.resolve(args.resolveDir, normalizedPath);
+          }
+        }
 
         // Resolve path to outdir (required for monorepos if the workdir is not the same as process.cwd())
         assert(
@@ -35,11 +55,9 @@ export function createWasmPlugin() {
           build.initialOptions.outdir,
         );
 
-        // Use relative path as module specifier for portability (note: the `?module` suffix is not needed in workerd)
-        const specifier = path.relative(
-          build.initialOptions.absWorkingDir,
-          copyFrom,
-        );
+        // Use path hash as module specifier for portability (note: the `?module` suffix is not needed in workerd)
+        const hash = crypto.createHash("sha256").update(copyFrom).digest("hex");
+        const specifier = `${hash}.wasm`;
 
         // Copy to outdir so it's included in the upload
         const copyTo = path.join(outdir, specifier);

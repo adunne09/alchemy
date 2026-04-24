@@ -19,6 +19,7 @@ describe("Miniflare", () => {
       const api = await createCloudflareApi();
       const bucket = await R2Bucket("bucket", {
         dev: { remote: true },
+        adopt: true,
         empty: true,
       });
       const worker = await Worker("worker", {

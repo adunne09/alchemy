@@ -28,7 +28,7 @@ describe("Prisma Project", async () => {
       const foundProject = projects.data.data.find((p) => p.name === testId);
 
       expect(foundProject).toBeTruthy();
-      expect(foundProject?.id).toEqual(`proj_${project.id}`);
+      expect(foundProject?.id).toEqual(project.id);
     } finally {
       await alchemy.destroy(scope);
 

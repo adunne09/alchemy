@@ -69,10 +69,83 @@ type VolumeInfo = {
   Scope: string;
 };
 
-type ContainerInfo = {
+export type ContainerInfo = {
   Id: string;
   State: { Status: "created" | "running" | "paused" | "stopped" | "exited" };
   Created: string;
+  Config: {
+    Image: string;
+    Cmd: string[] | null;
+    Env: string[] | null;
+    Healthcheck?: {
+      Test: string[] | null;
+      Interval?: number;
+      Timeout?: number;
+      Retries?: number;
+      StartPeriod?: number;
+      StartInterval?: number;
+    } | null;
+  };
+  HostConfig: {
+    PortBindings: Record<
+      string,
+      Array<{ HostIp: string; HostPort: string }> | null
+    > | null;
+    Binds: string[] | null;
+    RestartPolicy: {
+      Name: string;
+      MaximumRetryCount: number;
+    };
+    AutoRemove: boolean;
+  };
+  NetworkSettings: {
+    Networks: Record<
+      string,
+      {
+        NetworkID: string;
+        Aliases: string[] | null;
+      }
+    > | null;
+    Ports?: Record<
+      string,
+      Array<{ HostIp: string; HostPort: string }> | null
+    > | null;
+  };
+};
+
+export type ContainerRuntimeInfo = {
+  /**
+   * Map of internal container ports to their bound host ports.
+   * Format: "internalPort/protocol" -> hostPort (number)
+   */
+  ports: Record<string, number>;
+};
+
+export type NetworkInfo = {
+  Name: string;
+  Id: string;
+  Created: string;
+  Scope: string;
+  Driver: string;
+  EnableIPv6: boolean;
+  IPAM: {
+    Driver: string;
+    Options: Record<string, string> | null;
+    Config: Array<{
+      Subnet: string;
+      Gateway: string;
+    }> | null;
+  };
+  Internal: boolean;
+  Attachable: boolean;
+  Ingress: boolean;
+  ConfigFrom: {
+    Network: string;
+  };
+  ConfigOnly: boolean;
+  Containers: Record<string, any>;
+  Options: Record<string, string>;
+  Labels: Record<string, string>;
 };
 
 /**
@@ -103,6 +176,7 @@ export class DockerApi {
   async exec(
     args: string[],
     remainingAttempts = 3,
+    quiet = false,
   ): Promise<{ stdout: string; stderr: string }> {
     // If a custom config directory is provided, ensure all commands use it by
     // setting the DOCKER_CONFIG env variable for the spawned process.
@@ -124,13 +198,17 @@ export class DockerApi {
 
     // Stream stdout in real-time
     subprocess.stdout?.on("data", (chunk: string) => {
-      process.stdout.write(chunk);
+      if (!quiet) {
+        process.stdout.write(chunk);
+      }
       stdout += chunk;
     });
 
     // Stream stderr in real-time
     subprocess.stderr?.on("data", (chunk: string) => {
-      process.stderr.write(chunk);
+      if (!quiet) {
+        process.stderr.write(chunk);
+      }
       stderr += chunk;
     });
 
@@ -373,7 +451,11 @@ export class DockerApi {
    * @returns Container details in JSON format
    */
   async inspectContainer(containerId: string): Promise<ContainerInfo[]> {
-    const { stdout } = await this.exec(["container", "inspect", containerId]);
+    const { stdout } = await this.exec(
+      ["container", "inspect", containerId],
+      undefined,
+      true,
+    );
     try {
       return JSON.parse(stdout.trim()) as ContainerInfo[];
     } catch (_error) {
@@ -421,6 +503,40 @@ export class DockerApi {
    */
   async removeNetwork(networkId: string): Promise<void> {
     await this.exec(["network", "rm", networkId]);
+  }
+
+  /**
+   * Get Docker network information
+   *
+   * @param networkId Network ID or name
+   * @returns Network details in JSON format
+   */
+  async inspectNetwork(networkId: string): Promise<NetworkInfo[]> {
+    const { stdout } = await this.exec(
+      ["network", "inspect", networkId],
+      undefined,
+      true,
+    );
+    try {
+      return JSON.parse(stdout.trim()) as NetworkInfo[];
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  /**
+   * Check if a network exists
+   *
+   * @param networkId Network ID or name
+   * @returns True if network exists
+   */
+  async networkExists(networkId: string): Promise<boolean> {
+    try {
+      const networks = await this.inspectNetwork(networkId);
+      return networks.length > 0;
+    } catch (_error) {
+      return false;
+    }
   }
 
   /**

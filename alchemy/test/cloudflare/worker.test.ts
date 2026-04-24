@@ -28,6 +28,10 @@ import { assertWorkerDoesNotExist } from "./test-helpers.ts";
 import { Container } from "../../src/cloudflare/container.ts";
 import { listWorkersInNamespace } from "../../src/cloudflare/dispatch-namespace.ts";
 import { DispatchNamespace, Queue } from "../../src/cloudflare/index.ts";
+import {
+  deleteQueueConsumer,
+  listQueueConsumersForWorker,
+} from "../../src/cloudflare/queue-consumer.ts";
 import "../../src/test/vitest.ts";
 
 const ENABLE_WFP_TESTS = process.env.CLOUDFLARE_ACCOUNT_ENABLE_WFP !== "false";
@@ -743,8 +747,12 @@ describe("Worker Resource", () => {
       expect(worker.assets?.run_worker_first).toEqual(false);
 
       // Test that the static assets are accessible
-      const indexResponse = await fetchAndExpectOK(`${worker.url}/index.html`);
-      expect(await indexResponse.text()).toContain("Assets Config Test");
+      // const indexResponse = await fetchAndExpectOK(`${worker.url}/index.html`);
+      const indexResponse = await waitFor(
+        async () => await fetchAndExpectOK(`${worker.url}/index.html`),
+        async (response) =>
+          (await response.text()).includes("Assets Config Test"),
+      );
 
       // Test HTML headers
       expect(indexResponse.headers.get("ABC")).toEqual("456");
@@ -1985,6 +1993,7 @@ describe("Worker Resource", () => {
     const newWorkerName = `${BRANCH_PREFIX}-test-worker-rename-2`;
     try {
       await Worker("rename-worker", {
+        adopt: true,
         name: originalWorkerName,
         script: `
 				export default {
@@ -2178,6 +2187,271 @@ describe("Worker Resource", () => {
     }
   });
 
+  test("create worker with region placement hint (AWS)", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-region-aws`;
+
+    let worker: Worker | undefined;
+    try {
+      // Create a worker with region placement hint (AWS)
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello AWS region placement!', { status: 200 });
+            }
+          };
+        `,
+        placement: {
+          region: "aws:us-east-1",
+        },
+      });
+
+      // Verify the worker was created successfully
+      expect(worker.id).toBeTruthy();
+      expect(worker.name).toEqual(workerName);
+      expect(worker.placement).toEqual({
+        region: "aws:us-east-1",
+      });
+
+      // Verify the worker is reachable
+      await fetchAndExpectOK(worker.url!);
+
+      // Update the worker to disable placement by omitting placement
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello placement disabled!', { status: 200 });
+            }
+          };
+        `,
+        // No placement property means placement is disabled
+      });
+
+      // Verify the placement was disabled (undefined)
+      expect(worker.placement).toBeUndefined();
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("create worker with region placement hint (GCP)", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-region-gcp`;
+
+    let worker: Worker | undefined;
+    try {
+      // Create a worker with region placement hint (GCP)
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello GCP region placement!', { status: 200 });
+            }
+          };
+        `,
+        placement: {
+          region: "gcp:us-east4",
+        },
+      });
+
+      // Verify the worker was created successfully
+      expect(worker.id).toBeTruthy();
+      expect(worker.name).toEqual(workerName);
+      expect(worker.placement).toEqual({
+        region: "gcp:us-east4",
+      });
+
+      // Verify the worker is reachable
+      await fetchAndExpectOK(worker.url!);
+
+      // Update the worker to disable placement by omitting placement
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello placement disabled!', { status: 200 });
+            }
+          };
+        `,
+        // No placement property means placement is disabled
+      });
+
+      // Verify the placement was disabled (undefined)
+      expect(worker.placement).toBeUndefined();
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("create worker with region placement hint (Azure)", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-region-azure`;
+
+    let worker: Worker | undefined;
+    try {
+      // Create a worker with region placement hint (Azure)
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello Azure region placement!', { status: 200 });
+            }
+          };
+        `,
+        placement: {
+          region: "azure:westeurope",
+        },
+      });
+
+      // Verify the worker was created successfully
+      expect(worker.id).toBeTruthy();
+      expect(worker.name).toEqual(workerName);
+      expect(worker.placement).toEqual({
+        region: "azure:westeurope",
+      });
+
+      // Verify the worker is reachable
+      await fetchAndExpectOK(worker.url!);
+
+      // Update the worker to disable placement by omitting placement
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello placement disabled!', { status: 200 });
+            }
+          };
+        `,
+        // No placement property means placement is disabled
+      });
+
+      // Verify the placement was disabled (undefined)
+      expect(worker.placement).toBeUndefined();
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("create worker with host placement hint (layer 4 TCP)", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-host`;
+
+    let worker: Worker | undefined;
+    try {
+      // Create a worker with host placement hint (layer 4 TCP)
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello host placement!', { status: 200 });
+            }
+          };
+        `,
+        placement: {
+          host: "example.com:443",
+        },
+      });
+
+      // Verify the worker was created successfully
+      expect(worker.id).toBeTruthy();
+      expect(worker.name).toEqual(workerName);
+      expect(worker.placement).toEqual({
+        host: "example.com:443",
+      });
+
+      // Verify the worker is reachable
+      await fetchAndExpectOK(worker.url!);
+
+      // Update the worker to disable placement by omitting placement
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello placement disabled!', { status: 200 });
+            }
+          };
+        `,
+        // No placement property means placement is disabled
+      });
+
+      // Verify the placement was disabled (undefined)
+      expect(worker.placement).toBeUndefined();
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("create worker with hostname placement hint (layer 7 HTTP)", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-hostname`;
+
+    let worker: Worker | undefined;
+    try {
+      // Create a worker with hostname placement hint (layer 7 HTTP)
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello hostname placement!', { status: 200 });
+            }
+          };
+        `,
+        placement: {
+          hostname: "example.com",
+        },
+      });
+
+      // Verify the worker was created successfully
+      expect(worker.id).toBeTruthy();
+      expect(worker.name).toEqual(workerName);
+      expect(worker.placement).toEqual({
+        hostname: "example.com",
+      });
+
+      // Verify the worker is reachable
+      await fetchAndExpectOK(worker.url!);
+
+      // Update the worker to disable placement by omitting placement
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello placement disabled!', { status: 200 });
+            }
+          };
+        `,
+        // No placement property means placement is disabled
+      });
+
+      // Verify the placement was disabled (undefined)
+      expect(worker.placement).toBeUndefined();
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
   test("create worker with cpu_ms limit", async (scope) => {
     const workerName = `${BRANCH_PREFIX}-test-worker-cpu-ms`;
 
@@ -2219,6 +2493,49 @@ describe("Worker Resource", () => {
       });
 
       // Verify the limits were disabled (undefined)
+      expect(worker.limits).toBeUndefined();
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("create worker with subrequests limit", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-subrequests`;
+
+    let worker: Worker | undefined;
+    try {
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello subrequests!', { status: 200 });
+            }
+          };
+        `,
+        limits: {
+          subrequests: 50_000,
+        },
+      });
+
+      expect(worker.limits).toEqual({
+        subrequests: 50_000,
+      });
+
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        script: `
+          export default {
+            async fetch(request, env, ctx) {
+              return new Response('Hello!', { status: 200 });
+            }
+          };
+        `,
+      });
+
       expect(worker.limits).toBeUndefined();
     } finally {
       await destroy(scope);
@@ -2371,6 +2688,166 @@ describe("Worker Resource", () => {
         },
       });
     } finally {
+      await destroy(scope);
+    }
+  });
+
+  test("removes queue consumers when queue handler and eventSources are removed", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-remove-queue-handler`;
+    const queueName = `${BRANCH_PREFIX}-remove-queue-handler-q`;
+
+    let queue: Queue | undefined;
+    let worker: Worker | undefined;
+    try {
+      queue = await Queue("remove-queue-handler-queue", {
+        name: queueName,
+        adopt: true,
+      });
+
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        format: "esm",
+        url: true,
+        script: `
+          export default {
+            fetch() {
+              return new Response("Hello with queue!");
+            },
+            queue(batch) {
+              batch.ackAll();
+            }
+          };
+        `,
+        eventSources: [queue],
+      });
+
+      expect(worker.url).toBeTruthy();
+
+      const consumersBeforeUpdate = await listQueueConsumersForWorker(
+        api,
+        workerName,
+      );
+      expect(
+        consumersBeforeUpdate.some(
+          (consumer) => consumer.queueId === queue!.id,
+        ),
+      ).toBe(true);
+
+      worker = await Worker(workerName, {
+        name: workerName,
+        adopt: true,
+        format: "esm",
+        url: true,
+        script: `
+          export default {
+            fetch() {
+              return new Response("Hello without queue!");
+            }
+          };
+        `,
+      });
+
+      expect(worker.url).toBeTruthy();
+
+      const consumersAfterUpdate = await listQueueConsumersForWorker(
+        api,
+        workerName,
+      );
+      expect(
+        consumersAfterUpdate.some((consumer) => consumer.queueId === queue!.id),
+      ).toBe(false);
+
+      const body = await waitFor(
+        async () => {
+          const response = await fetchAndExpectOK(worker!.url!);
+          return response.text();
+        },
+        (text) => text === "Hello without queue!",
+        { timeoutMs: 10_000, intervalMs: 250 },
+      );
+
+      expect(body).toEqual("Hello without queue!");
+    } finally {
+      await destroy(scope);
+      await assertWorkerDoesNotExist(api, workerName);
+    }
+  });
+
+  test("delete false preserves worker and queue consumer on destroy", async (scope) => {
+    const workerName = `${BRANCH_PREFIX}-test-worker-delete-false`;
+    const queueName = `${BRANCH_PREFIX}-delete-false-queue`;
+    let queue: Queue | undefined;
+
+    try {
+      // Create a queue first (outside the nested scope so we can verify after destroy)
+      queue = await Queue("delete-false-queue", {
+        name: queueName,
+        adopt: true,
+      });
+
+      expect(queue.id).toBeTruthy();
+
+      // Create a worker with delete: false inside a nested scope
+      await alchemy.run("nested-delete-false", async (nestedScope) => {
+        const worker = await Worker(workerName, {
+          name: workerName,
+          adopt: true,
+          delete: false,
+          script: `
+            export default {
+              async fetch(request, env, ctx) {
+                return new Response('Hello from preserved worker!', { status: 200 });
+              },
+              async queue(batch, env, ctx) {
+                for (const message of batch.messages) {
+                  message.ack();
+                }
+              }
+            };
+          `,
+          format: "esm",
+          bindings: {
+            QUEUE: queue!,
+          },
+          eventSources: [queue!],
+        });
+
+        expect(worker.id).toBeTruthy();
+        expect(worker.name).toEqual(workerName);
+
+        // Destroy the nested scope - should NOT delete the worker or its queue consumer from Cloudflare
+        await alchemy.destroy(nestedScope);
+
+        // Verify the worker still exists via API after destroy
+        const workerResponse = await api.get(
+          `/accounts/${api.accountId}/workers/scripts/${workerName}`,
+        );
+        expect(workerResponse.status).toEqual(200);
+
+        // Verify the queue consumer still exists after destroy
+        const consumers = await listQueueConsumersForWorker(api, workerName);
+        const ourConsumer = consumers.find((c) => c.queueId === queue!.id);
+        expect(ourConsumer).toBeTruthy();
+      });
+    } finally {
+      // Manual cleanup since delete: false preserved everything
+      try {
+        // Delete queue consumers first (Cloudflare requires this before worker deletion)
+        const consumers = await listQueueConsumersForWorker(api, workerName);
+        await Promise.all(
+          consumers.map((c) =>
+            deleteQueueConsumer(api, c.queueId, c.consumerId),
+          ),
+        );
+      } catch {
+        // ignore if already cleaned up
+      }
+      try {
+        await deleteWorker(api, { scriptName: workerName });
+      } catch {
+        // ignore if already cleaned up
+      }
       await destroy(scope);
     }
   });

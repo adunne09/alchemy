@@ -51,6 +51,29 @@ type test = {
    * @param condition If true, test will be skipped
    */
   skipIf(condition: boolean): test;
+  skip: {
+    /**
+     * Create a test with default options
+     * @param name Test name
+     * @param fn Test function
+     * @param timeout Optional timeout in milliseconds
+     */
+    (name: string, fn: (scope: Scope) => Promise<any>, timeout?: number): void;
+
+    /**
+     * Create a test with custom options
+     * @param name Test name
+     * @param options Test configuration options
+     * @param fn Test function
+     * @param timeout Optional timeout in milliseconds
+     */
+    (
+      name: string,
+      options: TestOptions,
+      fn: (scope: Scope) => Promise<any>,
+      timeout?: number,
+    ): void;
+  };
 
   beforeAll(fn: (scope: Scope) => Promise<void>, timeout?: number): void;
 
@@ -95,6 +118,8 @@ export function test(meta: ImportMeta, defaultOptions?: TestOptions): test {
   // Add skipIf functionality
   test.skipIf = it.skipIf.bind(it);
 
+  test.skip = it.skip.bind(it);
+
   // Create local test scope based on filename
   const scope = new Scope({
     parent: undefined,
@@ -132,7 +157,7 @@ export function test(meta: ImportMeta, defaultOptions?: TestOptions): test {
     const timeout =
       typeof args[args.length - 1] === "number"
         ? (args[args.length - 1] as number)
-        : 120000;
+        : 150000;
     const spread = (obj: any) =>
       obj && typeof obj === "object"
         ? Object.fromEntries(

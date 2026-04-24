@@ -19,7 +19,6 @@ import {
 } from "./resource.ts";
 import type { State, StateStore, StateStoreType } from "./state.ts";
 import { FileSystemStateStore } from "./state/file-system-state-store.ts";
-import { InstrumentedStateStore } from "./state/instrumented-state-store.ts";
 import {
   createDummyLogger,
   createLoggerInstance,
@@ -102,6 +101,14 @@ export interface ScopeOptions extends ProviderCredentials {
    */
   adopt?: boolean;
   /**
+   * Skip decrypting secrets and treat them as undefined.
+   * Requires --force to be enabled.
+   * Useful for recovering from lost encryption passwords.
+   *
+   * @default false
+   */
+  eraseSecrets?: boolean;
+  /**
    * The path to the root directory of the project.
    *
    * @default process.cwd()
@@ -176,8 +183,8 @@ export class Scope {
 
   public static readonly KIND = "alchemy::Scope" as const;
 
-  public static storage = globalThis.__ALCHEMY_STORAGE__ ??=
-    new AsyncLocalStorage<Scope>();
+  public static storage = (globalThis.__ALCHEMY_STORAGE__ ??=
+    new AsyncLocalStorage<Scope>());
 
   public static getScope(): Scope | undefined {
     return Scope.storage.getStore();
@@ -209,6 +216,7 @@ export class Scope {
   public readonly tunnel: boolean;
   public readonly force: boolean;
   public readonly adopt: boolean;
+  public readonly eraseSecrets: boolean;
   public readonly destroyStrategy: DestroyStrategy;
   public readonly logger: LoggerApi;
   public readonly noTrack: boolean;
@@ -252,6 +260,7 @@ export class Scope {
       destroyStrategy,
       logger,
       adopt,
+      eraseSecrets,
       dotAlchemy,
       rootDir,
       isSelected,
@@ -310,6 +319,7 @@ export class Scope {
     this.tunnel = tunnel ?? this.parent?.tunnel ?? false;
     this.force = force ?? this.parent?.force ?? false;
     this.adopt = adopt ?? this.parent?.adopt ?? false;
+    this.eraseSecrets = eraseSecrets ?? this.parent?.eraseSecrets ?? false;
     this.destroyStrategy =
       destroyStrategy ?? this.parent?.destroyStrategy ?? "sequential";
     if (this.local) {
@@ -322,7 +332,7 @@ export class Scope {
       stateStore ??
       this.parent?.stateStore ??
       ((scope) => new FileSystemStateStore(scope));
-    this.state = new InstrumentedStateStore(this.stateStore(this));
+    this.state = this.stateStore(this);
     this.dataMutex = new AsyncMutex();
   }
 
@@ -331,12 +341,21 @@ export class Scope {
     return state !== undefined && (type === undefined || state.kind === type);
   }
 
-  public createPhysicalName(id: string, delimiter = "-"): string {
-    const app = this.appName;
-    const stage = this.stage;
-    return [app, ...this.chain.slice(2), id, stage]
-      .map((s) => s.replaceAll(/[^a-z0-9_-]/gi, delimiter))
+  public createPhysicalName(
+    id: string,
+    delimiter = "-",
+    maxLength?: number,
+  ): string {
+    let name = [this.appName, ...this.chain.slice(2), id, this.stage]
+      .map((part) => part.replaceAll(/[^a-z0-9_-]/gi, delimiter))
       .join(delimiter);
+    while (maxLength && name.length > maxLength) {
+      name = name
+        .split(delimiter)
+        .map((part) => part.slice(0, -1))
+        .join(delimiter);
+    }
+    return name;
   }
 
   public async spawn<

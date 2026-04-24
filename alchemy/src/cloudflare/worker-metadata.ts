@@ -2,6 +2,8 @@ import { assertNever } from "../util/assert-never.ts";
 import { camelToSnakeObjectDeep } from "../util/camel-to-snake.ts";
 import { logger } from "../util/logger.ts";
 import { memoize } from "../util/memoize.ts";
+import { isAiSearchNamespace } from "./ai-search-namespace.ts";
+import { isAiSearch } from "./ai-search.ts";
 import { extractCloudflareResult } from "./api-response.ts";
 import type { CloudflareApi } from "./api.ts";
 import type {
@@ -24,6 +26,7 @@ import {
   isWorker,
   Worker,
   type AssetsConfig,
+  type WorkerPlacement,
   type WorkerProps,
 } from "./worker.ts";
 
@@ -217,11 +220,10 @@ export interface WorkerMetadata {
     suspended: boolean;
   }[];
   containers?: { class_name: string }[];
-  placement?: {
-    mode: "smart";
-  };
+  placement?: WorkerPlacement;
   limits?: {
     cpu_ms?: number;
+    subrequests?: number;
   };
   tail_consumers?: Array<Worker | { service: string }>;
 }
@@ -240,9 +242,7 @@ export async function prepareWorkerMetadata(
     };
     tags?: string[];
     unstable_cacheWorkerSettings?: boolean;
-    placement?: {
-      mode: "smart";
-    };
+    placement?: WorkerPlacement;
   },
 ): Promise<WorkerMetadata> {
   const oldSettings = await (
@@ -420,7 +420,29 @@ export async function prepareWorkerMetadata(
   for (const [bindingName, binding] of Object.entries(bindings)) {
     // Create a copy of the binding to avoid modifying the original
 
-    if (typeof binding === "string") {
+    if (isAiSearch(binding)) {
+      // Single-instance bindings (ai_search) are always scoped to the `default` namespace.
+      if (binding.namespace !== undefined && binding.namespace !== "default") {
+        throw new Error(
+          `Worker binding "${bindingName}" uses a single-instance AiSearch binding (type: "ai_search"), ` +
+            `but the bound AiSearch instance "${binding.name}" is in namespace "${binding.namespace}". ` +
+            `Single-instance bindings only support the "default" namespace.\n` +
+            `Fix: either (1) create the AiSearch without a custom namespace, or ` +
+            `(2) bind the enclosing AiSearchNamespace and use \`env.${bindingName}.get("${binding.name}")\`.`,
+        );
+      }
+      meta.bindings.push({
+        type: "ai_search",
+        name: bindingName,
+        instance_name: binding.name,
+      });
+    } else if (isAiSearchNamespace(binding)) {
+      meta.bindings.push({
+        type: "ai_search_namespace",
+        name: bindingName,
+        namespace: binding.namespace,
+      });
+    } else if (typeof binding === "string") {
       meta.bindings.push({
         type: "plain_text",
         name: bindingName,
@@ -493,6 +515,14 @@ export async function prepareWorkerMetadata(
         bucket_name: binding.name,
         jurisdiction:
           binding.jurisdiction === "default" ? undefined : binding.jurisdiction,
+      });
+    } else if (binding.type === "send_email") {
+      meta.bindings.push({
+        type: "send_email",
+        name: bindingName,
+        destination_address: binding.destinationAddress,
+        allowed_destination_addresses: binding.allowedDestinationAddresses,
+        allowed_sender_addresses: binding.allowedSenderAddresses,
       });
     } else if (binding.type === "secrets_store_secret") {
       meta.bindings.push({
@@ -627,6 +657,13 @@ export async function prepareWorkerMetadata(
         name: bindingName,
         namespace_id: binding.namespace_id.toString(),
         simple: binding.simple,
+      });
+    } else if (binding.type === "vpc_service") {
+      meta.bindings.push({
+        type: "vpc_service",
+        name: bindingName,
+        service_name: binding.name,
+        service_id: binding.serviceId,
       });
     } else {
       assertNever(

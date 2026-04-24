@@ -102,14 +102,34 @@ export const Network = Resource(
     } else {
       // Create the network
       props.driver = props.driver || "bridge";
-      const networkId = await api.createNetwork(networkName, props.driver);
+      try {
+        const networkId = await api.createNetwork(networkName, props.driver);
 
-      return {
-        ...props,
-        id: networkId,
-        name: networkName,
-        createdAt: Date.now(),
-      };
+        return {
+          ...props,
+          id: networkId,
+          name: networkName,
+          createdAt: Date.now(),
+        };
+      } catch (error: any) {
+        const errorMessage = error.message || String(error);
+        if (
+          errorMessage.includes(
+            `network with name ${networkName} already exists`,
+          )
+        ) {
+          const [details] = await api.inspectNetwork(networkName);
+          if (details) {
+            return {
+              ...props,
+              id: details.Id,
+              name: networkName,
+              createdAt: Date.parse(details.Created) || Date.now(),
+            };
+          }
+        }
+        throw error;
+      }
     }
   },
 );

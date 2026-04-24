@@ -50,6 +50,32 @@ const emailRecords = await DnsRecords("email-dns", {
 });
 ```
 
+## Preserve Records on Destroy
+
+Use `delete: false` to prevent DNS records from being deleted when the resource is removed from Alchemy. This is useful for critical DNS records that should persist even if their Alchemy configuration is removed.
+
+```ts
+import { DnsRecords } from "alchemy/cloudflare";
+
+const records = await DnsRecords("critical-dns", {
+  zoneId: "YOUR_ZONE_ID",
+  delete: false,
+  records: [
+    {
+      name: "example.com",
+      type: "MX",
+      content: "aspmx.l.google.com",
+      priority: 1,
+    },
+    {
+      name: "example.com",
+      type: "TXT",
+      content: "v=spf1 include:_spf.google.com ~all",
+    },
+  ],
+});
+```
+
 ## Proxied Records
 
 Create proxied records to take advantage of Cloudflare's CDN and security features.

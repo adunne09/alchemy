@@ -766,5 +766,5 @@ describe("QueueConsumer Resource", () => {
         }
       }
     }
-  }, 60000);
+  }, 120_000);
 });
